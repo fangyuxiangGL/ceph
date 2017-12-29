@@ -573,12 +573,14 @@ void RGWQuotaInfo::decode_json(JSONObj *obj)
 void rgw_data_placement_target::dump(Formatter *f) const
 {
   encode_json("data_pool", data_pool, f);
+  encode_json("data_tail_pool", data_tail_pool, f);
   encode_json("data_extra_pool", data_extra_pool, f);
   encode_json("index_pool", index_pool, f);
 }
   
 void rgw_data_placement_target::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("data_pool", data_pool, obj);
+  JSONDecoder::decode_json("data_tail_pool", data_tail_pool, obj);
   JSONDecoder::decode_json("data_extra_pool", data_extra_pool, obj);
   JSONDecoder::decode_json("index_pool", index_pool, obj);
 }
@@ -601,6 +603,7 @@ void rgw_bucket::decode_json(JSONObj *obj) {
   if (explicit_placement.data_pool.empty()) {
     /* decoding old format */
     JSONDecoder::decode_json("pool", explicit_placement.data_pool, obj);
+    JSONDecoder::decode_json("data_tail_pool", explicit_placement.data_tail_pool, obj);
     JSONDecoder::decode_json("data_extra_pool", explicit_placement.data_extra_pool, obj);
     JSONDecoder::decode_json("index_pool", explicit_placement.index_pool, obj);
   }
@@ -929,6 +932,7 @@ void RGWZonePlacementInfo::dump(Formatter *f) const
 {
   encode_json("index_pool", index_pool, f);
   encode_json("data_pool", data_pool, f);
+  encode_json("data_tail_pool", data_tail_pool, f);
   encode_json("data_extra_pool", data_extra_pool, f);
   encode_json("index_type", (uint32_t)index_type, f);
   encode_json("compression", compression_type, f);
@@ -938,6 +942,7 @@ void RGWZonePlacementInfo::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("index_pool", index_pool, obj);
   JSONDecoder::decode_json("data_pool", data_pool, obj);
+  JSONDecoder::decode_json("data_tail_pool", data_tail_pool, obj);
   JSONDecoder::decode_json("data_extra_pool", data_extra_pool, obj);
   uint32_t it;
   JSONDecoder::decode_json("index_type", it, obj);

@@ -3082,6 +3082,8 @@ int RGWPutObjProcessor_Multipart::do_complete(size_t accounted_size,
   head_obj_op.meta.zones_trace = zones_trace;
   head_obj_op.meta.modify_tail = true;
 
+  op_target.set_in_tail(true);
+
   int r = head_obj_op.write_meta(obj_len, accounted_size, attrs);
   if (r < 0)
     return r;

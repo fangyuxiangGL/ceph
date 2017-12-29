@@ -861,6 +861,7 @@ WRITE_CLASS_ENCODER(rgw_pool)
 
 struct rgw_data_placement_target {
   rgw_pool data_pool;
+  rgw_pool data_tail_pool;
   rgw_pool data_extra_pool;
   rgw_pool index_pool;
 
@@ -868,22 +869,31 @@ struct rgw_data_placement_target {
   rgw_data_placement_target(const rgw_data_placement_target&) = default;
   rgw_data_placement_target(rgw_data_placement_target&&) = default;
 
-  rgw_data_placement_target(const rgw_pool& data_pool,
-                            const rgw_pool& data_extra_pool,
-                            const rgw_pool& index_pool)
-    : data_pool(data_pool),
-      data_extra_pool(data_extra_pool),
-      index_pool(index_pool) {
+  rgw_data_placement_target(const rgw_pool& _data_pool,
+                            const rgw_pool& _data_tail_pool,
+                            const rgw_pool& _data_extra_pool,
+                            const rgw_pool& _index_pool) 
+    : data_pool(_data_pool),
+      data_tail_pool(_data_tail_pool),
+      data_extra_pool(_data_extra_pool),
+      index_pool(_index_pool) {
   }
 
   rgw_data_placement_target&
   operator=(const rgw_data_placement_target&) = default;
-
+  
   const rgw_pool& get_data_extra_pool() const {
     if (data_extra_pool.empty()) {
       return data_pool;
     }
     return data_extra_pool;
+  }
+
+  const rgw_pool& get_data_tail_pool() const {
+    if (data_tail_pool.empty()) {
+      return data_tail_pool;
+    }
+    return data_tail_pool;
   }
 
   int compare(const rgw_data_placement_target& t) {
@@ -1001,6 +1011,7 @@ struct rgw_bucket {
     marker(b.marker),
     bucket_id(b.bucket_id),
     explicit_placement(b.explicit_placement.data_pool,
+                       b.explicit_placement.data_tail_pool,
                        b.explicit_placement.data_extra_pool,
                        b.explicit_placement.index_pool) {}
   rgw_bucket(const rgw_bucket&) = default;
@@ -1011,12 +1022,13 @@ struct rgw_bucket {
     b->marker = marker;
     b->bucket_id = bucket_id;
     b->explicit_placement.data_pool = explicit_placement.data_pool.to_str();
+    b->explicit_placement.data_tail_pool = explicit_placement.data_tail_pool.to_str();
     b->explicit_placement.data_extra_pool = explicit_placement.data_extra_pool.to_str();
     b->explicit_placement.index_pool = explicit_placement.index_pool.to_str();
   }
 
   void encode(bufferlist& bl) const {
-     ENCODE_START(10, 10, bl);
+     ENCODE_START(11, 10, bl);
     ::encode(name, bl);
     ::encode(marker, bl);
     ::encode(bucket_id, bl);
@@ -1027,11 +1039,12 @@ struct rgw_bucket {
       ::encode(explicit_placement.data_pool, bl);
       ::encode(explicit_placement.data_extra_pool, bl);
       ::encode(explicit_placement.index_pool, bl);
+      ::encode(explicit_placement.data_tail_pool, bl);
     }
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(10, 3, 3, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(11, 3, 3, bl);
     ::decode(name, bl);
     if (struct_v < 10) {
       ::decode(explicit_placement.data_pool.name, bl);
@@ -1068,6 +1081,8 @@ struct rgw_bucket {
         ::decode(explicit_placement.data_pool, bl);
         ::decode(explicit_placement.data_extra_pool, bl);
         ::decode(explicit_placement.index_pool, bl);
+        if (struct_v >= 11)
+          ::decode(explicit_placement.data_tail_pool, bl);
       }
     }
     DECODE_FINISH(bl);
@@ -1085,6 +1100,10 @@ struct rgw_bucket {
 
   const rgw_pool& get_data_extra_pool() const {
     return explicit_placement.get_data_extra_pool();
+  }
+
+  const rgw_pool& get_data_tail_pool() {                                                  
+    return explicit_placement.get_data_tail_pool();
   }
 
   void dump(Formatter *f) const;
@@ -2098,7 +2117,8 @@ struct rgw_obj {
   const rgw_pool& get_explicit_data_pool() {
     if (!in_extra_data || bucket.explicit_placement.data_extra_pool.empty()) {
       return bucket.explicit_placement.data_pool;
-    }
+    }  
+
     return bucket.explicit_placement.data_extra_pool;
   }
 };

@@ -141,15 +141,17 @@ class rgw_obj_select {
   rgw_obj obj;
   rgw_raw_obj raw_obj;
   bool is_raw;
+  bool is_head;
 
 public:
-  rgw_obj_select() : is_raw(false) {}
-  rgw_obj_select(const rgw_obj& _obj) : obj(_obj), is_raw(false) {}
-  rgw_obj_select(const rgw_raw_obj& _raw_obj) : raw_obj(_raw_obj), is_raw(true) {}
+  rgw_obj_select() : is_raw(false), is_head(true) {}
+  rgw_obj_select(const rgw_obj& _obj) : obj(_obj), is_raw(false), is_head(true) {}
+  rgw_obj_select(const rgw_raw_obj& _raw_obj) : raw_obj(_raw_obj), is_raw(true), is_head(true) {}
   rgw_obj_select(const rgw_obj_select& rhs) {
     placement_rule = rhs.placement_rule;
     is_raw = rhs.is_raw;
-    if (is_raw) {
+    is_head = rhs.is_head;
+   if (is_raw) {
       raw_obj = rhs.raw_obj;
     } else {
       obj = rhs.obj;
@@ -158,6 +160,14 @@ public:
 
   rgw_raw_obj get_raw_obj(const RGWZoneGroup& zonegroup, const RGWZoneParams& zone_params) const;
   rgw_raw_obj get_raw_obj(RGWRados *store) const;
+
+  void set_head_obj(bool val) { 
+    is_head = val; 
+  }
+
+  bool is_head_obj() const { 
+    return is_head;
+  }
 
   rgw_obj_select& operator=(const rgw_obj& rhs) {
     obj = rhs;
@@ -1119,6 +1129,7 @@ WRITE_CLASS_ENCODER(RGWSystemMetaObj)
 struct RGWZonePlacementInfo {
   rgw_pool index_pool;
   rgw_pool data_pool;
+  rgw_pool data_tail_pool;
   rgw_pool data_extra_pool; /* if not set we should use data_pool */
   RGWBucketIndexType index_type;
   std::string compression_type;
@@ -1126,17 +1137,18 @@ struct RGWZonePlacementInfo {
   RGWZonePlacementInfo() : index_type(RGWBIType_Normal) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(6, 1, bl);
+    ENCODE_START(7, 1, bl);
     ::encode(index_pool.to_str(), bl);
     ::encode(data_pool.to_str(), bl);
     ::encode(data_extra_pool.to_str(), bl);
     ::encode((uint32_t)index_type, bl);
     ::encode(compression_type, bl);
+    ::encode(data_tail_pool.to_str(), bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::iterator& bl) {
-    DECODE_START(6, bl);
+    DECODE_START(7, bl);
     string index_pool_str;
     string data_pool_str;
     ::decode(index_pool_str, bl);
@@ -1156,6 +1168,11 @@ struct RGWZonePlacementInfo {
     if (struct_v >= 6) {
       ::decode(compression_type, bl);
     }
+    if (struct_v >= 7) {
+      string data_tail_pool_str;
+      ::decode(data_tail_pool_str, bl);
+      data_tail_pool = rgw_pool(data_tail_pool_str);
+    }
     DECODE_FINISH(bl);
   }
   const rgw_pool& get_data_extra_pool() const {
@@ -1163,6 +1180,12 @@ struct RGWZonePlacementInfo {
       return data_pool;
     }
     return data_extra_pool;
+  }
+  const rgw_pool& get_data_tail_pool() const {
+    if (data_tail_pool.empty()) {
+      return data_pool;
+    }
+    return data_tail_pool;
   }
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
@@ -1326,6 +1349,23 @@ struct RGWZoneParams : RGWSystemMetaObj {
     } else {
       *pool = iter->second.get_data_extra_pool();
     }
+    return true;
+  }
+
+  bool get_tail_data_pool(const string& placement_id, const rgw_obj& obj, rgw_pool *pool) const {
+    const rgw_data_placement_target& explicit_placement = obj.bucket.explicit_placement;
+    if (!explicit_placement.data_pool.empty()) {
+      *pool = explicit_placement.get_data_tail_pool();
+      return true;
+    }
+    if (placement_id.empty()) {
+      return false;
+    }
+    auto iter = placement_pools.find(placement_id);
+    if (iter == placement_pools.end()) {
+      return false;
+    }
+    *pool = iter->second.get_data_tail_pool();
     return true;
   }
 };
@@ -2308,8 +2348,8 @@ class RGWRados
   // This field represents the number of bucket index object shards
   uint32_t bucket_index_max_shards;
 
-  int get_obj_head_ioctx(const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::IoCtx *ioctx);
-  int get_obj_head_ref(const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_rados_ref *ref);
+  int get_obj_head_ioctx(const RGWBucketInfo& bucket_info, const rgw_obj& obj, librados::IoCtx *ioctx, bool in_tail = false);
+  int get_obj_head_ref(const RGWBucketInfo& bucket_info, const rgw_obj& obj, rgw_rados_ref *ref, bool in_tail = false);
   int get_system_obj_ref(const rgw_raw_obj& obj, rgw_rados_ref *ref);
   uint64_t max_bucket_id;
 
@@ -2317,7 +2357,7 @@ class RGWRados
                            RGWObjState *olh_state, RGWObjState **target_state);
   int get_system_obj_state_impl(RGWObjectCtx *rctx, rgw_raw_obj& obj, RGWRawObjState **state, RGWObjVersionTracker *objv_tracker);
   int get_obj_state_impl(RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj, RGWObjState **state,
-                         bool follow_olh, bool assume_noent = false);
+                         bool follow_olh, bool assume_noent = false, bool in_tail = false);
   int append_atomic_test(RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj,
                          librados::ObjectOperation& op, RGWObjState **state);
 
@@ -2631,8 +2671,8 @@ public:
   int select_bucket_location_by_rule(const string& location_rule, RGWZonePlacementInfo *rule_info);
   void create_bucket_id(string *bucket_id);
 
-  bool get_obj_data_pool(const string& placement_rule, const rgw_obj& obj, rgw_pool *pool);
-  bool obj_to_raw(const string& placement_rule, const rgw_obj& obj, rgw_raw_obj *raw_obj);
+  bool get_obj_data_pool(const string& placement_rule, const rgw_obj& obj, rgw_pool *pool, bool is_tail = false);
+  bool obj_to_raw(const string& placement_rule, const rgw_obj& obj, rgw_raw_obj *raw_obj, bool in_tail = false);
 
   int create_bucket(RGWUserInfo& owner, rgw_bucket& bucket,
                             const string& zonegroup_id,
@@ -2733,7 +2773,7 @@ public:
     bool versioning_disabled;
 
     bool bs_initialized;
-
+    bool in_tail;
   protected:
     int get_state(RGWObjState **pstate, bool follow_olh, bool assume_noent = false);
     void invalidate_state();
@@ -2746,13 +2786,16 @@ public:
     Object(RGWRados *_store, const RGWBucketInfo& _bucket_info, RGWObjectCtx& _ctx, const rgw_obj& _obj) : store(_store), bucket_info(_bucket_info),
                                                                                                ctx(_ctx), obj(_obj), bs(store),
                                                                                                state(NULL), versioning_disabled(false),
-                                                                                               bs_initialized(false) {}
+                                                                                               bs_initialized(false), in_tail(false) {}
 
     RGWRados *get_store() { return store; }
     rgw_obj& get_obj() { return obj; }
     RGWObjectCtx& get_ctx() { return ctx; }
     RGWBucketInfo& get_bucket_info() { return bucket_info; }
     int get_manifest(RGWObjManifest **pmanifest);
+
+    bool is_in_tail() {return in_tail;}
+    void set_in_tail(bool val) {in_tail = val;}
 
     int get_bucket_shard(BucketShard **pbs) {
       if (!bs_initialized) {
@@ -3274,7 +3317,7 @@ public:
 
   int get_system_obj_state(RGWObjectCtx *rctx, rgw_raw_obj& obj, RGWRawObjState **state, RGWObjVersionTracker *objv_tracker);
   int get_obj_state(RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj, RGWObjState **state,
-                    bool follow_olh, bool assume_noent = false);
+                    bool follow_olh, bool assume_noent = false, bool in_tail = false);
   int get_obj_state(RGWObjectCtx *rctx, const RGWBucketInfo& bucket_info, const rgw_obj& obj, RGWObjState **state) {
     return get_obj_state(rctx, bucket_info, obj, state, true);
   }
