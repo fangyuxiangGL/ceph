@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Ceph distributed storage system
 #
@@ -60,7 +60,7 @@ function run() {
     fi
 
     if test -f ./install-deps.sh ; then
-	$DRY_RUN ./install-deps.sh || return 1
+	$DRY_RUN source ./install-deps.sh || return 1
     fi
 
     # Init defaults after deps are installed. get_processors() depends on coreutils nproc.
@@ -71,7 +71,17 @@ function run() {
     $DRY_RUN ./do_cmake.sh $@ || return 1
     $DRY_RUN cd build
     $DRY_RUN make $BUILD_MAKEOPTS tests || return 1
-    $DRY_RUN ctest $CHECK_MAKEOPTS --output-on-failure || return 1
+    # prevent OSD EMFILE death on tests, make sure large than 1024
+    $DRY_RUN ulimit -n $(ulimit -Hn)
+    if [ $(ulimit -n) -lt 1024 ];then
+        echo "***ulimit -n too small, better bigger than 1024 for test***"
+        return 1
+    fi
+ 
+    if ! $DRY_RUN ctest $CHECK_MAKEOPTS --output-on-failure; then
+        rm -f ${TMPDIR:-/tmp}/ceph-asok.*
+        return 1
+    fi
 }
 
 function main() {

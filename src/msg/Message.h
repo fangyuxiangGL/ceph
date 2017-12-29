@@ -68,8 +68,9 @@
 #define MSG_OSD_MARK_ME_DOWN 74
 #define MSG_OSD_FULL         75
 
-#define MSG_OSD_SUBOP        76
-#define MSG_OSD_SUBOPREPLY   77
+// removed right after luminous
+//#define MSG_OSD_SUBOP        76
+//#define MSG_OSD_SUBOPREPLY   77
 
 #define MSG_OSD_PGTEMP       78
 
@@ -101,6 +102,7 @@
 
 #define MSG_OSD_BACKFILL_RESERVE 99
 #define MSG_OSD_RECOVERY_RESERVE 150
+#define MSG_OSD_FORCE_RECOVERY 151
 
 #define MSG_OSD_PG_PUSH        105
 #define MSG_OSD_PG_PULL        106
@@ -118,6 +120,8 @@
 
 #define MSG_OSD_PG_CREATED      116
 #define MSG_OSD_REP_SCRUBMAP    117
+#define MSG_OSD_PG_RECOVERY_DELETE 118
+#define MSG_OSD_PG_RECOVERY_DELETE_REPLY 119
 
 // *** MDS ***
 
@@ -168,7 +172,7 @@
 
 // *** generic ***
 #define MSG_TIMECHECK             0x600
-#define MSG_MON_HEALTH            0x601
+//#define MSG_MON_HEALTH            0x601  // remove post-luminous
 
 // *** Message::encode() crcflags bits ***
 #define MSG_CRC_DATA           (1 << 0)

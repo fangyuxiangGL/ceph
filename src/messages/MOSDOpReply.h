@@ -21,6 +21,7 @@
 #include "MOSDOp.h"
 #include "os/ObjectStore.h"
 #include "common/errno.h"
+#include "common/mClockCommon.h"
 
 /*
  * OSD op reply
@@ -32,21 +33,23 @@
 
 class MOSDOpReply : public Message {
 
-  static const int HEAD_VERSION = 8;
+  static const int HEAD_VERSION = 9;
   static const int COMPAT_VERSION = 2;
 
   object_t oid;
   pg_t pgid;
   vector<OSDOp> ops;
-  int64_t flags;
+  bool bdata_encode;
+  int64_t flags = 0;
   errorcode32_t result;
   eversion_t bad_replay_version;
   eversion_t replay_version;
-  version_t user_version;
-  epoch_t osdmap_epoch;
-  int32_t retry_attempt;
+  version_t user_version = 0;
+  epoch_t osdmap_epoch = 0;
+  int32_t retry_attempt = -1;
   bool do_redirect;
   request_redirect_t redirect;
+  dmc::PhaseType qos_resp;
 
 public:
   const object_t& get_oid() const { return oid; }
@@ -93,6 +96,8 @@ public:
   void set_redirect(const request_redirect_t& redir) { redirect = redir; }
   const request_redirect_t& get_redirect() const { return redirect; }
   bool is_redirect_reply() const { return do_redirect; }
+  void set_qos_resp(const dmc::PhaseType qresp) { qos_resp = qresp; }
+  dmc::PhaseType get_qos_resp() const { return qos_resp; }
 
   void add_flags(int f) { flags |= f; }
 
@@ -104,6 +109,7 @@ public:
   }
   void claim_ops(vector<OSDOp>& o) {
     o.swap(ops);
+    bdata_encode = false;
   }
 
   /**
@@ -125,13 +131,15 @@ public:
 
 public:
   MOSDOpReply()
-    : Message(CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION) {
+    : Message(CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION),
+    bdata_encode(false) {
     do_redirect = false;
   }
-  MOSDOpReply(const MOSDOp *req, int r, epoch_t e, int acktype,
-	      bool ignore_out_data)
+  MOSDOpReply(const MOSDOp *req, int r, epoch_t e, int acktype, bool ignore_out_data,
+              dmc::PhaseType qresp = dmc::PhaseType::reservation)
     : Message(CEPH_MSG_OSD_OPREPLY, HEAD_VERSION, COMPAT_VERSION),
-      oid(req->hobj.oid), pgid(req->pgid.pgid), ops(req->ops) {
+      oid(req->hobj.oid), pgid(req->pgid.pgid), ops(req->ops),
+      bdata_encode(false), qos_resp(qresp) {
 
     set_tid(req->get_tid());
     result = r;
@@ -154,8 +162,10 @@ private:
 
 public:
   void encode_payload(uint64_t features) override {
-
-    OSDOp::merge_osd_op_vector_out_data(ops, data);
+    if(false == bdata_encode) {
+      OSDOp::merge_osd_op_vector_out_data(ops, data);
+      bdata_encode = true;
+    }
 
     if ((features & CEPH_FEATURE_PGID64) == 0) {
       header.version = 1;
@@ -203,6 +213,11 @@ public:
         if (do_redirect) {
           ::encode(redirect, payload);
         }
+        if ((features & CEPH_FEATURE_QOS_DMC) == 0) {
+          header.version = 8;
+        } else {
+          ::encode(qos_resp, payload);
+        }
       }
       encode_trace(payload, features);
     }
@@ -236,6 +251,7 @@ public:
       ::decode(do_redirect, p);
       if (do_redirect)
 	::decode(redirect, p);
+      ::decode(qos_resp, p);
       decode_trace(p);
     } else if (header.version < 2) {
       ceph_osd_reply_head head;
@@ -297,6 +313,9 @@ public:
         }
       }
       if (header.version >= 8) {
+	if (header.version >= 9) {
+	  ::decode(qos_resp, p);
+	}
         decode_trace(p);
       }
     }

@@ -9,7 +9,6 @@
 #include "include/rados/librados.hpp"
 #include "ClusterWatcher.h"
 #include "PoolReplayer.h"
-#include "ImageDeleter.h"
 #include "types.h"
 
 #include <set>
@@ -22,6 +21,7 @@ namespace librbd { struct ImageCtx; }
 namespace rbd {
 namespace mirror {
 
+template <typename> struct ServiceDaemon;
 template <typename> struct Threads;
 class MirrorAdminSocketHook;
 
@@ -61,10 +61,10 @@ private:
   Mutex m_lock;
   Cond m_cond;
   RadosRef m_local;
+  std::unique_ptr<ServiceDaemon<librbd::ImageCtx>> m_service_daemon;
 
   // monitor local cluster for config changes in peers
   std::unique_ptr<ClusterWatcher> m_local_cluster_watcher;
-  std::shared_ptr<ImageDeleter> m_image_deleter;
   std::map<PoolPeer, std::unique_ptr<PoolReplayer> > m_pool_replayers;
   std::atomic<bool> m_stopping = { false };
   bool m_manual_stop = false;

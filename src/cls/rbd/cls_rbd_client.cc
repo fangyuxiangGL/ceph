@@ -13,24 +13,33 @@
 namespace librbd {
   namespace cls_client {
 
-    void get_immutable_metadata_start(librados::ObjectReadOperation *op) {
-      bufferlist bl, empty_bl;
+    void get_initial_metadata_start(librados::ObjectReadOperation *op) {
+      bufferlist bl, empty_bl, features_bl;
       snapid_t snap = CEPH_NOSNAP;
       ::encode(snap, bl);
       op->exec("rbd", "get_size", bl);
       op->exec("rbd", "get_object_prefix", empty_bl);
+
+      ::encode(snap, features_bl);
+      ::encode(true, features_bl);
+      op->exec("rbd", "get_features", features_bl);
     }
 
-    int get_immutable_metadata_finish(bufferlist::iterator *it,
-                                      std::string *object_prefix,
-                                      uint8_t *order) {
+    int get_initial_metadata_finish(bufferlist::iterator *it,
+                                    std::string *object_prefix,
+                                    uint8_t *order,
+                                    uint64_t *features) {
       try {
 	uint64_t size;
+	uint64_t incompatible_features;
 	// get_size
 	::decode(*order, *it);
 	::decode(size, *it);
 	// get_object_prefix
 	::decode(*object_prefix, *it);
+	// get_features
+	::decode(*features, *it);
+	::decode(incompatible_features, *it);
       } catch (const buffer::error &err) {
 	return -EBADMSG;
       }
@@ -38,11 +47,11 @@ namespace librbd {
 
     }
 
-    int get_immutable_metadata(librados::IoCtx *ioctx, const std::string &oid,
-			       std::string *object_prefix, uint8_t *order)
+    int get_initial_metadata(librados::IoCtx *ioctx, const std::string &oid,
+                             std::string *object_prefix, uint8_t *order, uint64_t *features)
     {
       librados::ObjectReadOperation op;
-      get_immutable_metadata_start(&op);
+      get_initial_metadata_start(&op);
 
       bufferlist out_bl;
       int r = ioctx->operate(oid, &op, &out_bl);
@@ -51,7 +60,7 @@ namespace librbd {
       }
 
       bufferlist::iterator it = out_bl.begin();
-      return get_immutable_metadata_finish(&it, object_prefix, order);
+      return get_initial_metadata_finish(&it, object_prefix, order, features);
     }
 
     void get_mutable_metadata_start(librados::ObjectReadOperation *op,
@@ -508,26 +517,40 @@ namespace librbd {
       op->exec("rbd", "snapshot_rename", bl);
     }
 
-    int get_snapcontext(librados::IoCtx *ioctx, const std::string &oid,
-			::SnapContext *snapc)
+    void get_snapcontext_start(librados::ObjectReadOperation *op)
     {
-      bufferlist inbl, outbl;
+      bufferlist bl;
+      op->exec("rbd", "get_snapcontext", bl);
+    }
 
-      int r = ioctx->exec(oid, "rbd", "get_snapcontext", inbl, outbl);
-      if (r < 0)
-	return r;
-
+    int get_snapcontext_finish(bufferlist::iterator *it,
+                               ::SnapContext *snapc)
+    {
       try {
-	bufferlist::iterator iter = outbl.begin();
-	::decode(*snapc, iter);
+	::decode(*snapc, *it);
       } catch (const buffer::error &err) {
 	return -EBADMSG;
       }
-
-      if (!snapc->is_valid())
+      if (!snapc->is_valid()) {
 	return -EBADMSG;
-
+      }
       return 0;
+    }
+
+    int get_snapcontext(librados::IoCtx *ioctx, const std::string &oid,
+			::SnapContext *snapc)
+    {
+      librados::ObjectReadOperation op;
+      get_snapcontext_start(&op);
+
+      bufferlist out_bl;
+      int r = ioctx->operate(oid, &op, &out_bl);
+      if (r < 0) {
+	return r;
+      }
+
+      auto bl_it = out_bl.begin();
+      return get_snapcontext_finish(&bl_it, snapc);
     }
 
     void snapshot_list_start(librados::ObjectReadOperation *op,
@@ -1870,6 +1893,44 @@ namespace librbd {
       return ioctx->operate(RBD_MIRROR_LEADER, &op);
     }
 
+    void mirror_image_map_list_start(librados::ObjectReadOperation *op,
+                                     const std::string &start_after,
+                                     uint64_t max_read) {
+      bufferlist bl;
+      ::encode(start_after, bl);
+      ::encode(max_read, bl);
+
+      op->exec("rbd", "mirror_image_map_list", bl);
+    }
+
+    int mirror_image_map_list_finish(bufferlist::iterator *iter,
+                                     std::map<std::string, cls::rbd::MirrorImageMap> *image_mapping) {
+      try {
+        ::decode(*image_mapping, *iter);
+      } catch (const buffer::error &err) {
+        return -EBADMSG;
+      }
+      return 0;
+    }
+
+    void mirror_image_map_update(librados::ObjectWriteOperation *op,
+                                 const std::string &global_image_id,
+                                 const cls::rbd::MirrorImageMap &image_map) {
+      bufferlist bl;
+      ::encode(global_image_id, bl);
+      ::encode(image_map, bl);
+
+      op->exec("rbd", "mirror_image_map_update", bl);
+    }
+
+    void mirror_image_map_remove(librados::ObjectWriteOperation *op,
+                                 const std::string &global_image_id) {
+      bufferlist bl;
+      ::encode(global_image_id, bl);
+
+      op->exec("rbd", "mirror_image_map_remove", bl);
+    }
+
     // Consistency groups functions
     int group_create(librados::IoCtx *ioctx, const std::string &oid)
     {
@@ -2046,9 +2107,12 @@ namespace librbd {
       return ioctx->operate(RBD_TRASH, &op);
     }
 
-    void trash_list_start(librados::ObjectReadOperation *op)
+    void trash_list_start(librados::ObjectReadOperation *op,
+                          const std::string &start, uint64_t max_return)
     {
       bufferlist bl;
+      ::encode(start, bl);
+      ::encode(max_return, bl);
       op->exec("rbd", "trash_list", bl);
     }
 
@@ -2067,10 +2131,11 @@ namespace librbd {
     }
 
     int trash_list(librados::IoCtx *ioctx,
+                   const std::string &start, uint64_t max_return,
                    map<string, cls::rbd::TrashImageSpec> *entries)
     {
       librados::ObjectReadOperation op;
-      trash_list_start(&op);
+      trash_list_start(&op, start, max_return);
 
       bufferlist out_bl;
       int r = ioctx->operate(RBD_TRASH, &op, &out_bl);

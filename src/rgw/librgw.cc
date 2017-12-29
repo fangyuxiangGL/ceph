@@ -50,10 +50,8 @@
 #include "rgw_lib_frontend.h"
 
 #include <errno.h>
-#include <chrono>
 #include <thread>
 #include <string>
-#include <string.h>
 #include <mutex>
 
 
@@ -103,7 +101,7 @@ namespace rgw {
       auto expire_s = cct->_conf->rgw_nfs_namespace_expire_secs;
 
       /* delay between gc cycles */
-      auto delay_s = std::max(1, std::min(MIN_EXPIRE_S, expire_s/2));
+      auto delay_s = std::max(int64_t(1), std::min(int64_t(MIN_EXPIRE_S), expire_s/2));
 
       unique_lock uniq(mtx);
     restart:
@@ -239,6 +237,11 @@ namespace rgw {
       abort_req(s, op, ret);
       goto done;
     }
+
+    /* now expected by rgw_log_op() */
+    rgw_env.set("REQUEST_METHOD", s->info.method);
+    rgw_env.set("REQUEST_URI", s->info.request_uri);
+    rgw_env.set("QUERY_STRING", "");
 
     /* XXX authorize does less here then in the REST path, e.g.,
      * the user's info is cached, but still incomplete */

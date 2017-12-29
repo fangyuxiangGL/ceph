@@ -14,6 +14,8 @@
 
 #include <random>
 
+#include "include/scope_guard.h"
+
 #include "messages/MMonGetMap.h"
 #include "messages/MMonGetVersion.h"
 #include "messages/MMonGetVersionReply.h"
@@ -55,7 +57,8 @@ MonClient::MonClient(CephContext *cct_) :
   more_log_pending(false),
   want_monmap(true),
   had_a_connection(false),
-  reopen_interval_multiplier(1.0),
+  reopen_interval_multiplier(
+    cct_->_conf->get_val<double>("mon_client_hunt_interval_min_multiple")),
   last_mon_command_tid(0),
   version_req_id(0)
 {
@@ -729,20 +732,22 @@ void MonClient::_finish_hunting()
   }
 
   had_a_connection = true;
-  reopen_interval_multiplier /= 2.0;
-  if (reopen_interval_multiplier < 1.0)
-    reopen_interval_multiplier = 1.0;
+  _un_backoff();
 }
 
 void MonClient::tick()
 {
   ldout(cct, 10) << __func__ << dendl;
 
+  auto reschedule_tick = make_scope_guard([this] {
+      schedule_tick();
+    });
+
   _check_auth_tickets();
   
   if (_hunting()) {
     ldout(cct, 1) << "continuing hunt" << dendl;
-    _reopen_session();
+    return _reopen_session();
   } else if (active_con) {
     // just renew as needed
     utime_t now = ceph_clock_now();
@@ -765,32 +770,36 @@ void MonClient::tick()
       if (interval > cct->_conf->mon_client_ping_timeout) {
 	ldout(cct, 1) << "no keepalive since " << lk << " (" << interval
 		      << " seconds), reconnecting" << dendl;
-	_reopen_session();
+	return _reopen_session();
       }
-
       send_log();
     }
-  }
 
-  schedule_tick();
+    _un_backoff();
+  }
+}
+
+void MonClient::_un_backoff()
+{
+  // un-backoff our reconnect interval
+  reopen_interval_multiplier = std::max(
+    cct->_conf->get_val<double>("mon_client_hunt_interval_min_multiple"),
+    reopen_interval_multiplier /
+    cct->_conf->get_val<double>("mon_client_hunt_interval_backoff"));
+  ldout(cct, 20) << __func__ << " reopen_interval_multipler now "
+		 << reopen_interval_multiplier << dendl;
 }
 
 void MonClient::schedule_tick()
 {
-  struct C_Tick : public Context {
-    MonClient *monc;
-    explicit C_Tick(MonClient *m) : monc(m) {}
-    void finish(int r) override {
-      monc->tick();
-    }
-  };
-
+  auto do_tick = make_lambda_context([this]() { tick(); });
   if (_hunting()) {
-    timer.add_event_after(cct->_conf->mon_client_hunt_interval
-			  * reopen_interval_multiplier,
-			  new C_Tick(this));
-  } else
-    timer.add_event_after(cct->_conf->mon_client_ping_interval, new C_Tick(this));
+    const auto hunt_interval = (cct->_conf->mon_client_hunt_interval *
+				reopen_interval_multiplier);
+    timer.add_event_after(hunt_interval, do_tick);
+  } else {
+    timer.add_event_after(cct->_conf->mon_client_ping_interval, do_tick);
+  }
 }
 
 // ---------
@@ -871,7 +880,7 @@ int MonClient::_check_auth_rotating()
 
   utime_t now = ceph_clock_now();
   utime_t cutoff = now;
-  cutoff -= MIN(30.0, cct->_conf->auth_service_ticket_ttl / 4.0);
+  cutoff -= std::min(30.0, cct->_conf->auth_service_ticket_ttl / 4.0);
   utime_t issued_at_lower_bound = now;
   issued_at_lower_bound -= cct->_conf->auth_service_ticket_ttl;
   if (!rotating_secrets->need_new_secrets(cutoff)) {

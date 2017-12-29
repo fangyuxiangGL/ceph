@@ -46,9 +46,9 @@ public:
     assert(slow_op.empty());
   }
   void insert(utime_t now, TrackedOpRef op);
-  void dump_ops(utime_t now, Formatter *f);
-  void dump_ops_by_duration(utime_t now, Formatter *f);
-  void dump_slow_ops(utime_t now, Formatter *f);
+  void dump_ops(utime_t now, Formatter *f, set<string> filters = {""});
+  void dump_ops_by_duration(utime_t now, Formatter *f, set<string> filters = {""});
+  void dump_slow_ops(utime_t now, Formatter *f, set<string> filters = {""});
   void on_shutdown();
   void set_size_and_duration(uint32_t new_size, uint32_t new_duration) {
     history_size = new_size;
@@ -69,7 +69,7 @@ class OpTracker {
   OpHistory history;
   float complaint_time;
   int log_threshold;
-  bool tracking_enabled;
+  std::atomic<bool> tracking_enabled;
   RWLock       lock;
 
 public:
@@ -86,28 +86,55 @@ public:
   void set_history_slow_op_size_and_threshold(uint32_t new_size, uint32_t new_threshold) {
     history.set_slow_op_size_and_threshold(new_size, new_threshold);
   }
+  bool is_tracking() const {
+    return tracking_enabled;
+  }
   void set_tracking(bool enable) {
-    RWLock::WLocker l(lock);
     tracking_enabled = enable;
   }
-  bool dump_ops_in_flight(Formatter *f, bool print_only_blocked=false);
-  bool dump_historic_ops(Formatter *f, bool by_duration = false);
-  bool dump_historic_slow_ops(Formatter *f);
+  bool dump_ops_in_flight(Formatter *f, bool print_only_blocked = false, set<string> filters = {""});
+  bool dump_historic_ops(Formatter *f, bool by_duration = false, set<string> filters = {""});
+  bool dump_historic_slow_ops(Formatter *f, set<string> filters = {""});
   bool register_inflight_op(TrackedOp *i);
   void unregister_inflight_op(TrackedOp *i);
 
   void get_age_ms_histogram(pow2_hist_t *h);
 
   /**
+   * walk through ops in flight
+   *
+   * @param oldest_sec the amount of time since the oldest op was initiated
+   * @param check a function consuming tracked ops, the function returns
+   *              false if it don't want to be fed with more ops
+   * @return True if there are any Ops to warn on, false otherwise
+   */
+  bool visit_ops_in_flight(utime_t* oldest_secs,
+			   std::function<bool(TrackedOp&)>&& visit);
+  /**
+   * walk through slow ops in flight
+   *
+   * @param[out] oldest_sec the amount of time since the oldest op was initiated
+   * @param[out] num_slow_ops total number of slow ops
+   * @param on_warn a function consuming tracked ops, the function returns
+   *                false if it don't want to be fed with more ops
+   * @return True if there are any Ops to warn on, false otherwise
+   */
+  bool with_slow_ops_in_flight(utime_t* oldest_secs,
+			       int* num_slow_ops,
+			       std::function<void(TrackedOp&)>&& on_warn);
+  /**
    * Look for Ops which are too old, and insert warning
    * strings for each Op that is too old.
    *
-   * @param warning_strings A vector<string> reference which is filled
+   * @param summary[out] a string summarizing slow Ops.
+   * @param warning_strings[out] A vector<string> reference which is filled
    * with a warning string for each old Op.
+   * @param slow[out] total number of slow ops
    * @return True if there are any Ops to warn on, false otherwise.
    */
-  bool check_ops_in_flight(std::vector<string> &warning_strings,
-			   int *slow = NULL);
+  bool check_ops_in_flight(std::string* summary,
+			   std::vector<string> &warning_strings,
+			   int* slow = nullptr);
 
   void on_shutdown() {
     history.on_shutdown();
@@ -213,7 +240,9 @@ protected:
   /// return a unique descriptor of the Op; eg the message it's attached to
   virtual void _dump_op_descriptor_unlocked(ostream& stream) const = 0;
   /// called when the last non-OpTracker reference is dropped
-  virtual void _unregistered() {};
+  virtual void _unregistered() {}
+
+  virtual bool filter_out(const set<string>& filters) { return true; }
 
 public:
   ZTracer::Trace osd_trace;

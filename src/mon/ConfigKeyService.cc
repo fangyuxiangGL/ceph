@@ -40,7 +40,7 @@ int ConfigKeyService::store_get(const string &key, bufferlist &bl)
   return mon->store->get(STORE_PREFIX, key, bl);
 }
 
-void ConfigKeyService::get_store_prefixes(set<string>& s)
+void ConfigKeyService::get_store_prefixes(set<string>& s) const
 {
   s.insert(STORE_PREFIX);
 }
@@ -184,7 +184,8 @@ bool ConfigKeyService::service_dispatch(MonOpRequestRef op)
     }
     ss << "obtained '" << key << "'";
 
-  } else if (prefix == "config-key put") {
+  } else if (prefix == "config-key put" ||
+	     prefix == "config-key set") {
     if (!mon->is_leader()) {
       mon->forward_request_leader(op);
       // we forward the message; so return now.
@@ -241,7 +242,8 @@ bool ConfigKeyService::service_dispatch(MonOpRequestRef op)
       ret = -ENOENT;
     }
 
-  } else if (prefix == "config-key list") {
+  } else if (prefix == "config-key list" ||
+	     prefix == "config-key ls") {
     stringstream tmp_ss;
     store_list(tmp_ss);
     rdata.append(tmp_ss);

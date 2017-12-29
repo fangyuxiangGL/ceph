@@ -99,7 +99,15 @@ available, then the "failed" daemon will return as a standby.
 Deactivate an MDS, causing it to flush its entire journal to
 backing RADOS objects and close all open client sessions. Deactivating an MDS
 is primarily intended for bringing down a rank after reducing the number of
-active MDS (max_mds).
+active MDS (max_mds). Once the rank is deactivated, the MDS daemon will rejoin the
+cluster as a standby.
+``<role>`` can take one of three forms:
+
+::
+
+    <fs_name>:<rank>
+    <fs_id>:<rank>
+    <rank>
 
 Use ``mds deactivate`` in conjunction with adjustments to ``max_mds`` to
 shrink an MDS cluster.  See :doc:`/cephfs/multimds`
@@ -115,6 +123,11 @@ shrink an MDS cluster.  See :doc:`/cephfs/multimds`
 ::
 
     mds repaired <role>
+
+::
+
+    mds stat
+
 
 
 Global settings
@@ -157,10 +170,6 @@ filesystem.
 
 ::
 
-    mds getmap
-
-::
-
     mds set_state
 
 ::
@@ -170,21 +179,18 @@ filesystem.
 Legacy
 ------
 
-The ``ceph mds set`` command is the deprecated version of ``ceph fs set``,
-from before there was more than one filesystem per cluster. It operates
-on whichever filesystem is marked as the default (see ``ceph fs
-set-default``.)
+These legacy commands are obsolete and no longer usable post-Luminous.
 
 ::
 
-    mds stat
-    mds dump  # replaced by "fs get"
-    mds stop  # replaced by "mds deactivate"
-    mds set_max_mds # replaced by "fs set max_mds"
-    mds set # replaced by "fs set"
+    mds add_data_pool # replaced by "fs add_data_pool"
     mds cluster_down  # replaced by "fs set cluster_down"
     mds cluster_up  # replaced by "fs set cluster_up"
+    mds dump  # replaced by "fs get"
+    mds getmap # replaced by "fs dump"
     mds newfs # replaced by "fs new"
-    mds add_data_pool # replaced by "fs add_data_pool"
-    mds remove_data_pool #replaced by "fs remove_data_pool"
+    mds remove_data_pool # replaced by "fs rm_data_pool"
+    mds set # replaced by "fs set"
+    mds set_max_mds # replaced by "fs set max_mds"
+    mds stop  # replaced by "mds deactivate"
 

@@ -17,6 +17,7 @@
 #include "librbd/io/ImageRequestWQ.h"
 #include "osdc/Striper.h"
 #include <boost/scope_exit.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/assign/list_of.hpp>
 #include <utility>
 #include <vector>
@@ -547,6 +548,26 @@ TEST_F(TestInternal, MetadataFilter) {
   ASSERT_TRUE(res.size() == 3U);
 }
 
+TEST_F(TestInternal, MetadataConfApply) {
+  REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+
+  ASSERT_EQ(-ENOENT, ictx->operations->metadata_remove("conf_rbd_cache"));
+
+  bool cache = ictx->cache;
+  std::string rbd_conf_cache = cache ? "true" : "false";
+  std::string new_rbd_conf_cache = !cache ? "true" : "false";
+
+  ASSERT_EQ(0, ictx->operations->metadata_set("conf_rbd_cache",
+                                              new_rbd_conf_cache));
+  ASSERT_EQ(!cache, ictx->cache);
+
+  ASSERT_EQ(0, ictx->operations->metadata_remove("conf_rbd_cache"));
+  ASSERT_EQ(cache, ictx->cache);
+}
+
 TEST_F(TestInternal, SnapshotCopyup)
 {
   REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
@@ -717,7 +738,7 @@ TEST_F(TestInternal, DiscardCopyup)
   REQUIRE_FEATURE(RBD_FEATURE_LAYERING);
 
   CephContext* cct = reinterpret_cast<CephContext*>(_rados.cct());
-  REQUIRE(!cct->_conf->rbd_skip_partial_discard);
+  REQUIRE(!cct->_conf->get_val<bool>("rbd_skip_partial_discard"));
 
   m_image_name = get_temp_image_name();
   m_image_size = 1 << 14;
@@ -884,7 +905,7 @@ TEST_F(TestInternal, WriteFullCopyup) {
   bl.append(std::string(1 << ictx->order, '1'));
   ASSERT_EQ((ssize_t)bl.length(),
             ictx->io_work_queue->write(0, bl.length(), bufferlist{bl}, 0));
-  ASSERT_EQ(0, librbd::flush(ictx));
+  ASSERT_EQ(0, ictx->io_work_queue->flush());
 
   ASSERT_EQ(0, create_snapshot("snap1", true));
 
@@ -1050,7 +1071,7 @@ TEST_F(TestInternal, TestCoR)
   printf("generated random write map:\n");
   for (map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
        itr != write_tracker.end(); ++itr)
-    printf("\t [%-8ld, %-8ld]\n",
+    printf("\t [%-8lu, %-8lu]\n",
            (unsigned long)itr->first, (unsigned long)itr->second);
 
   bufferlist bl;
@@ -1059,30 +1080,35 @@ TEST_F(TestInternal, TestCoR)
   printf("write data based on random map\n");
   for (map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
        itr != write_tracker.end(); ++itr) {
-    printf("\twrite object-%-4ld\t\n", (unsigned long)itr->first);
+    printf("\twrite object-%-4lu\t\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.write(itr->second, TEST_IO_SIZE, bl));
   }
+
+  ASSERT_EQ(0, image.flush());
 
   bufferlist readbl;
   printf("verify written data by reading\n");
   {
     map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
-    printf("\tread object-%-4ld\n", (unsigned long)itr->first);
+    printf("\tread object-%-4lu\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.read(itr->second, TEST_IO_SIZE, readbl));
     ASSERT_TRUE(readbl.contents_equal(bl));
   }
 
   int64_t data_pool_id = image.get_data_pool_id();
   rados_ioctx_t d_ioctx;
-  rados_ioctx_create2(_cluster, data_pool_id, &d_ioctx);
+  ASSERT_EQ(0, rados_wait_for_latest_osdmap(_cluster));
+  ASSERT_EQ(0, rados_ioctx_create2(_cluster, data_pool_id, &d_ioctx));
+
+  std::string block_name_prefix = image.get_block_name_prefix() + ".";
 
   const char *entry;
   rados_list_ctx_t list_ctx;
   set<string> obj_checker;
   ASSERT_EQ(0, rados_nobjects_list_open(d_ioctx, &list_ctx));
   while (rados_nobjects_list_next(list_ctx, &entry, NULL, NULL) != -ENOENT) {
-    if (strstr(entry, info.block_name_prefix)) {
-      const char *block_name_suffix = entry + strlen(info.block_name_prefix) + 1;
+    if (boost::starts_with(entry, block_name_prefix)) {
+      const char *block_name_suffix = entry + block_name_prefix.length();
       obj_checker.insert(block_name_suffix);
     }
   }
@@ -1105,14 +1131,14 @@ TEST_F(TestInternal, TestCoR)
   printf("read from \"child\"\n");
   {
     map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
-    printf("\tread object-%-4ld\n", (unsigned long)itr->first);
+    printf("\tread object-%-4lu\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.read(itr->second, TEST_IO_SIZE, readbl));
     ASSERT_TRUE(readbl.contents_equal(bl));
   }
 
   for (map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
        itr != write_tracker.end(); ++itr) {
-    printf("\tread object-%-4ld\n", (unsigned long)itr->first);
+    printf("\tread object-%-4lu\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.read(itr->second, TEST_IO_SIZE, readbl));
     ASSERT_TRUE(readbl.contents_equal(bl));
   }
@@ -1120,7 +1146,7 @@ TEST_F(TestInternal, TestCoR)
   printf("read again reversely\n");
   for (map<uint64_t, uint64_t>::iterator itr = --write_tracker.end();
        itr != write_tracker.begin(); --itr) {
-    printf("\tread object-%-4ld\n", (unsigned long)itr->first);
+    printf("\tread object-%-4lu\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.read(itr->second, TEST_IO_SIZE, readbl));
     ASSERT_TRUE(readbl.contents_equal(bl));
   }
@@ -1130,12 +1156,12 @@ TEST_F(TestInternal, TestCoR)
 
   printf("check whether child image has the same set of objects as parent\n");
   ASSERT_EQ(0, m_rbd.open(m_ioctx, image, clonename.c_str(), NULL));
-  ASSERT_EQ(0, image.stat(info, sizeof(info)));
+  block_name_prefix = image.get_block_name_prefix() + ".";
 
   ASSERT_EQ(0, rados_nobjects_list_open(d_ioctx, &list_ctx));
   while (rados_nobjects_list_next(list_ctx, &entry, NULL, NULL) != -ENOENT) {
-    if (strstr(entry, info.block_name_prefix)) {
-      const char *block_name_suffix = entry + strlen(info.block_name_prefix) + 1;
+    if (boost::starts_with(entry, block_name_prefix)) {
+      const char *block_name_suffix = entry + block_name_prefix.length();
       set<string>::iterator it = obj_checker.find(block_name_suffix);
       ASSERT_TRUE(it != obj_checker.end());
       obj_checker.erase(it);
@@ -1187,7 +1213,7 @@ TEST_F(TestInternal, FlattenNoEmptyObjects)
   printf("generated random write map:\n");
   for (map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
        itr != write_tracker.end(); ++itr)
-    printf("\t [%-8ld, %-8ld]\n",
+    printf("\t [%-8lu, %-8lu]\n",
            (unsigned long)itr->first, (unsigned long)itr->second);
 
   bufferlist bl;
@@ -1196,30 +1222,35 @@ TEST_F(TestInternal, FlattenNoEmptyObjects)
   printf("write data based on random map\n");
   for (map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
        itr != write_tracker.end(); ++itr) {
-    printf("\twrite object-%-4ld\t\n", (unsigned long)itr->first);
+    printf("\twrite object-%-4lu\t\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.write(itr->second, TEST_IO_SIZE, bl));
   }
+
+  ASSERT_EQ(0, image.flush());
 
   bufferlist readbl;
   printf("verify written data by reading\n");
   {
     map<uint64_t, uint64_t>::iterator itr = write_tracker.begin();
-    printf("\tread object-%-4ld\n", (unsigned long)itr->first);
+    printf("\tread object-%-4lu\n", (unsigned long)itr->first);
     ASSERT_EQ(TEST_IO_SIZE, image.read(itr->second, TEST_IO_SIZE, readbl));
     ASSERT_TRUE(readbl.contents_equal(bl));
   }
 
   int64_t data_pool_id = image.get_data_pool_id();
   rados_ioctx_t d_ioctx;
-  rados_ioctx_create2(_cluster, data_pool_id, &d_ioctx);
+  ASSERT_EQ(0, rados_wait_for_latest_osdmap(_cluster));
+  ASSERT_EQ(0, rados_ioctx_create2(_cluster, data_pool_id, &d_ioctx));
+
+  std::string block_name_prefix = image.get_block_name_prefix() + ".";
 
   const char *entry;
   rados_list_ctx_t list_ctx;
   set<string> obj_checker;
   ASSERT_EQ(0, rados_nobjects_list_open(d_ioctx, &list_ctx));
   while (rados_nobjects_list_next(list_ctx, &entry, NULL, NULL) != -ENOENT) {
-    if (strstr(entry, info.block_name_prefix)) {
-      const char *block_name_suffix = entry + strlen(info.block_name_prefix) + 1;
+    if (boost::starts_with(entry, block_name_prefix)) {
+      const char *block_name_suffix = entry + block_name_prefix.length();
       obj_checker.insert(block_name_suffix);
     }
   }
@@ -1244,12 +1275,12 @@ TEST_F(TestInternal, FlattenNoEmptyObjects)
   ASSERT_EQ(0, image.flatten());
 
   printf("check whether child image has the same set of objects as parent\n");
-  ASSERT_EQ(0, image.stat(info, sizeof(info)));
+  block_name_prefix = image.get_block_name_prefix() + ".";
 
   ASSERT_EQ(0, rados_nobjects_list_open(d_ioctx, &list_ctx));
   while (rados_nobjects_list_next(list_ctx, &entry, NULL, NULL) != -ENOENT) {
-    if (strstr(entry, info.block_name_prefix)) {
-      const char *block_name_suffix = entry + strlen(info.block_name_prefix) + 1;
+    if (boost::starts_with(entry, block_name_prefix)) {
+      const char *block_name_suffix = entry + block_name_prefix.length();
       set<string>::iterator it = obj_checker.find(block_name_suffix);
       ASSERT_TRUE(it != obj_checker.end());
       obj_checker.erase(it);

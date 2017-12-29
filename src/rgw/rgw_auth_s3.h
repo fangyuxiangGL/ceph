@@ -36,7 +36,7 @@ class ExternalAuthStrategy : public rgw::auth::Strategy,
   using keystone_cache_t = rgw::keystone::TokenCache;
   using EC2Engine = rgw::auth::keystone::EC2Engine;
 
-  EC2Engine keystone_engine;
+  boost::optional <EC2Engine> keystone_engine;
   LDAPEngine ldap_engine;
 
   aplptr_t create_apl_remote(CephContext* const cct,
@@ -56,16 +56,18 @@ public:
                        RGWRados* const store,
                        AWSEngine::VersionAbstractor* const ver_abstractor)
     : store(store),
-      keystone_engine(cct, ver_abstractor,
-                      static_cast<rgw::auth::RemoteApplier::Factory*>(this),
-                      keystone_config_t::get_instance(),
-                      keystone_cache_t::get_instance<keystone_config_t>()),
       ldap_engine(cct, store, *ver_abstractor,
                   static_cast<rgw::auth::RemoteApplier::Factory*>(this)) {
 
     if (cct->_conf->rgw_s3_auth_use_keystone &&
         ! cct->_conf->rgw_keystone_url.empty()) {
-      add_engine(Control::SUFFICIENT, keystone_engine);
+
+      keystone_engine.emplace(cct, ver_abstractor,
+                              static_cast<rgw::auth::RemoteApplier::Factory*>(this),
+                              keystone_config_t::get_instance(),
+                              keystone_cache_t::get_instance<keystone_config_t>());
+      add_engine(Control::SUFFICIENT, *keystone_engine);
+
     }
 
     if (cct->_conf->rgw_s3_auth_use_ldap &&
@@ -80,7 +82,8 @@ public:
 };
 
 
-template <class AbstractorT>
+template <class AbstractorT,
+          bool AllowAnonAccessT = false>
 class AWSAuthStrategy : public rgw::auth::Strategy,
                         public rgw::auth::LocalApplier::Factory {
   typedef rgw::auth::IdentityApplier::aplptr_t aplptr_t;
@@ -92,6 +95,7 @@ class AWSAuthStrategy : public rgw::auth::Strategy,
   RGWRados* const store;
   AbstractorT ver_abstractor;
 
+  S3AnonymousEngine anonymous_engine;
   ExternalAuthStrategy external_engines;
   LocalEngine local_engine;
 
@@ -110,10 +114,17 @@ public:
                   RGWRados* const store)
     : store(store),
       ver_abstractor(cct),
+      anonymous_engine(cct,
+                       static_cast<rgw::auth::LocalApplier::Factory*>(this)),
       external_engines(cct, store, &ver_abstractor),
       local_engine(cct, store, ver_abstractor,
                    static_cast<rgw::auth::LocalApplier::Factory*>(this)) {
+    /* The anonymous auth. */
+    if (AllowAnonAccessT) {
+      add_engine(Control::SUFFICIENT, anonymous_engine);
+    }
 
+    /* The external auth. */
     Control local_engine_mode;
     if (! external_engines.is_empty()) {
       add_engine(Control::SUFFICIENT, external_engines);
@@ -123,6 +134,7 @@ public:
       local_engine_mode = Control::SUFFICIENT;
     }
 
+    /* The local auth. */
     if (cct->_conf->rgw_s3_auth_use_rados) {
       add_engine(local_engine_mode, local_engine);
     }
@@ -332,7 +344,7 @@ int parse_credentials(const req_info& info,                     /* in */
                       boost::string_view& signedheaders,        /* out */
                       boost::string_view& signature,            /* out */
                       boost::string_view& date,                 /* out */
-                      bool& using_qs);                          /* out */
+                      const bool using_qs);                     /* in */
 
 static inline std::string get_v4_canonical_uri(const req_info& info) {
   /* The code should normalize according to RFC 3986 but S3 does NOT do path

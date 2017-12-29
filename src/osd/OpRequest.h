@@ -24,6 +24,7 @@
 #include "include/memory.h"
 #include "osd/osd_types.h"
 #include "common/TrackedOp.h"
+#include "common/mClockCommon.h"
 
 /**
  * The OpRequest takes in a Message* and takes over a single reference
@@ -85,6 +86,7 @@ struct OpRequest : public TrackedOp {
 private:
   Message *request; /// the logical request we are tracking
   osd_reqid_t reqid;
+  entity_inst_t req_src_inst;
   uint8_t hit_flag_points;
   uint8_t latest_flag_point;
   utime_t dequeued_time;
@@ -102,6 +104,7 @@ private:
 protected:
   void _dump_op_descriptor_unlocked(ostream& stream) const override;
   void _unregistered() override;
+  bool filter_out(const set<string>& filters) override;
 
 public:
   ~OpRequest() override {
@@ -113,6 +116,7 @@ public:
   epoch_t min_epoch = 0;      ///< min epoch needed to handle this msg
 
   bool hitset_inserted;
+  dmc::PhaseType qos_resp;
   const Message *get_req() const { return request; }
   Message *get_nonconst_req() { return request; }
 

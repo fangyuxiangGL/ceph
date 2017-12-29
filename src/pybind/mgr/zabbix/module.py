@@ -12,7 +12,10 @@ from mgr_module import MgrModule
 
 
 def avg(data):
-    return sum(data) / float(len(data))
+    if len(data):
+        return sum(data) / float(len(data))
+    else:
+        return 0
 
 
 class ZabbixSender(object):
@@ -87,7 +90,7 @@ class Module(MgrModule):
             value = self.get_localized_config(key, default)
             if value is None:
                 raise RuntimeError('Configuration key {0} not set; "ceph '
-                                   'config-key put mgr/zabbix/{0} '
+                                   'config-key set mgr/zabbix/{0} '
                                    '<value>"'.format(key))
 
             self.set_config_option(key, value)
@@ -113,7 +116,9 @@ class Module(MgrModule):
         data = dict()
 
         health = json.loads(self.get('health')['json'])
-        data['overall_status'] = health['overall_status']
+        # 'status' is luminous+, 'overall_status' is legacy mode.
+        data['overall_status'] = health.get('status',
+                                            health.get('overall_status'))
         data['overall_status_int'] = \
             self.ceph_health_mapping.get(data['overall_status'])
 
@@ -169,6 +174,8 @@ class Module(MgrModule):
 
         osd_stats = self.get('osd_stats')
         for osd in osd_stats['osd_stats']:
+            if osd['kb'] == 0:
+                continue
             osd_fill.append((float(osd['kb_used']) / float(osd['kb'])) * 100)
             osd_apply_latency.append(osd['perf_stat']['apply_latency_ms'])
             osd_commit_latency.append(osd['perf_stat']['commit_latency_ms'])
@@ -255,11 +262,12 @@ class Module(MgrModule):
         while self.run:
             self.log.debug('Waking up for new iteration')
 
-            # Sometimes fetching data fails, should be fixed by PR #16020
             try:
                 self.send()
             except Exception as exc:
-                self.log.error(exc)
+                # Shouldn't happen, but let's log it and retry next interval,
+                # rather than dying completely.
+                self.log.exception("Unexpected error during send():")
 
             interval = self.config['interval']
             self.log.debug('Sleeping for %d seconds', interval)

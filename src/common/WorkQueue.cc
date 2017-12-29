@@ -87,9 +87,7 @@ void ThreadPool::worker(WorkThread *wt)
   ldout(cct,10) << "worker start" << dendl;
   
   std::stringstream ss;
-  char name[16] = {0};
-  ceph_pthread_getname(pthread_self(), name, sizeof(name));
-  ss << name << " thread " << name;
+  ss << name << " thread " << (void *)pthread_self();
   heartbeat_handle_d *hb = cct->get_heartbeat_map()->add_worker(ss.str(), pthread_self());
 
   while (!_stop) {
@@ -298,9 +296,7 @@ void ShardedThreadPool::shardedthreadpool_worker(uint32_t thread_index)
   ldout(cct,10) << "worker start" << dendl;
 
   std::stringstream ss;
-  char name[16] = {0};
-  ceph_pthread_getname(pthread_self(), name, sizeof(name));
-  ss << name << " thread " << name;
+  ss << name << " thread " << (void *)pthread_self();
   heartbeat_handle_d *hb = cct->get_heartbeat_map()->add_worker(ss.str(), pthread_self());
 
   while (!stop_threads) {
@@ -420,6 +416,7 @@ void ShardedThreadPool::unpause()
   ldout(cct,10) << "unpause" << dendl;
   shardedpool_lock.Lock();
   pause_threads = false;
+  wq->stop_return_waiting_threads();
   shardedpool_cond.Signal();
   shardedpool_lock.Unlock();
   ldout(cct,10) << "unpaused" << dendl;
@@ -436,6 +433,7 @@ void ShardedThreadPool::drain()
     wait_cond.Wait(shardedpool_lock);
   }
   drain_threads = false;
+  wq->stop_return_waiting_threads();
   shardedpool_cond.Signal();
   shardedpool_lock.Unlock();
   ldout(cct,10) << "drained" << dendl;

@@ -23,6 +23,7 @@
 #include "client/Client.h"
 #include "mon/MonClient.h"
 #include "osdc/Objecter.h"
+#include "PyModuleRegistry.h"
 
 
 class MMgrMap;
@@ -48,6 +49,7 @@ protected:
   Mutex lock;
   SafeTimer timer;
 
+  PyModuleRegistry py_module_registry;
   std::shared_ptr<Mgr> active_mgr;
 
   int orig_argc;
@@ -58,6 +60,8 @@ protected:
   void handle_mgr_map(MMgrMap *m);
   void _update_log_config();
   void send_beacon();
+
+  bool available_in_map;
 
 public:
   MgrStandby(int argc, const char **argv);

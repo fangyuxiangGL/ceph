@@ -151,7 +151,23 @@ cdef extern from "rados/librados.h" nogil:
     int rados_cluster_stat(rados_t cluster, rados_cluster_stat_t *result)
     int rados_cluster_fsid(rados_t cluster, char *buf, size_t len)
     int rados_blacklist_add(rados_t cluster, char *client_address, uint32_t expire_seconds)
-
+    int rados_application_enable(rados_ioctx_t io, const char *app_name,
+                                 int force)
+    void rados_set_osdmap_full_try(rados_ioctx_t io)
+    void rados_unset_osdmap_full_try(rados_ioctx_t io)
+    int rados_application_list(rados_ioctx_t io, char *values,
+                             size_t *values_len)
+    int rados_application_metadata_get(rados_ioctx_t io, const char *app_name,
+                                       const char *key, char *value,
+                                       size_t *value_len)
+    int rados_application_metadata_set(rados_ioctx_t io, const char *app_name,
+                                       const char *key, const char *value)
+    int rados_application_metadata_remove(rados_ioctx_t io,
+                                          const char *app_name, const char *key)
+    int rados_application_metadata_list(rados_ioctx_t io,
+                                        const char *app_name, char *keys,
+                                        size_t *key_len, char *values,
+                                        size_t *value_len)
     int rados_ping_monitor(rados_t cluster, const char *mon_id, char **outstr, size_t *outstrlen)
     int rados_mon_command(rados_t cluster, const char **cmd, size_t cmdlen,
                           const char *inbuf, size_t inbuflen,
@@ -178,7 +194,11 @@ cdef extern from "rados/librados.h" nogil:
 
     int rados_wait_for_latest_osdmap(rados_t cluster)
 
+    int rados_service_register(rados_t cluster, const char *service, const char *daemon, const char *metadata_dict)
+    int rados_service_update_status(rados_t cluster, const char *status_dict)
+
     int rados_ioctx_create(rados_t cluster, const char *pool_name, rados_ioctx_t *ioctx)
+    int rados_ioctx_create2(rados_t cluster, int64_t pool_id, rados_ioctx_t *ioctx)
     void rados_ioctx_destroy(rados_ioctx_t io)
     int rados_ioctx_pool_set_auid(rados_ioctx_t io, uint64_t auid)
     void rados_ioctx_locator_set_key(rados_ioctx_t io, const char *key)
@@ -264,8 +284,8 @@ cdef extern from "rados/librados.h" nogil:
     void rados_write_op_truncate(rados_write_op_t write_op, uint64_t offset)
     void rados_write_op_zero(rados_write_op_t write_op, uint64_t offset, uint64_t len)
 
-    void rados_read_op_omap_get_vals(rados_read_op_t read_op, const char * start_after, const char * filter_prefix, uint64_t max_return, rados_omap_iter_t * iter, int * prval)
-    void rados_read_op_omap_get_keys(rados_read_op_t read_op, const char * start_after, uint64_t max_return, rados_omap_iter_t * iter, int * prval)
+    void rados_read_op_omap_get_vals2(rados_read_op_t read_op, const char * start_after, const char * filter_prefix, uint64_t max_return, rados_omap_iter_t * iter, unsigned char *pmore, int * prval)
+    void rados_read_op_omap_get_keys2(rados_read_op_t read_op, const char * start_after, uint64_t max_return, rados_omap_iter_t * iter, unsigned char *pmore, int * prval)
     void rados_read_op_omap_get_vals_by_keys(rados_read_op_t read_op, const char * const* keys, size_t keys_len, rados_omap_iter_t * iter, int * prval)
     int rados_read_op_operate(rados_read_op_t read_op, rados_ioctx_t io, const char * oid, int flags)
     int rados_aio_read_op_operate(rados_read_op_t read_op, rados_ioctx_t io, rados_completion_t completion, const char *oid, int flags)
@@ -650,7 +670,7 @@ cdef class Rados(object):
         """
         Checks if the Rados object is in a special state
 
-        :raises: RadosStateError
+        :raises: :class:`RadosStateError`
         """
         if self.state in args:
             return
@@ -1181,6 +1201,32 @@ Rados object in state %s." % self.state)
         io.io = ioctx
         return io
 
+    @requires(('pool_id', int))
+    def open_ioctx2(self, pool_id):
+        """
+        Create an io context
+
+        The io context allows you to perform operations within a particular
+        pool.
+
+        :param pool_id: ID of the pool
+        :type pool_id: int
+
+        :raises: :class:`TypeError`, :class:`Error`
+        :returns: Ioctx - Rados Ioctx object
+        """
+        self.require_state("connected")
+        cdef:
+            rados_ioctx_t ioctx
+            int64_t _pool_id = pool_id
+        with nogil:
+            ret = rados_ioctx_create2(self.cluster, _pool_id, &ioctx)
+        if ret < 0:
+            raise make_ex(ret, "error opening pool id '%s'" % pool_id)
+        io = Ioctx(str(pool_id))
+        io.io = ioctx
+        return io
+
     def mon_command(self, cmd, inbuf, timeout=0, target=None):
         """
         mon_command[_target](cmd, inbuf, outbuf, outbuflen, outs, outslen)
@@ -1449,6 +1495,40 @@ Rados object in state %s." % self.state)
         # NOTE(sileht): Prevents the callback method from being garbage collected
         self.monitor_callback = None
         self.monitor_callback2 = cb
+
+    @requires(('service', str_type), ('daemon', str_type), ('metadata', dict))
+    def service_daemon_register(self, service, daemon, metadata):
+        """
+        :param str service: service name (e.g. "rgw")
+        :param str daemon: daemon name (e.g. "gwfoo")
+        :param dict metadata: static metadata about the register daemon
+               (e.g., the version of Ceph, the kernel version.)
+        """
+        service = cstr(service, 'service')
+        daemon = cstr(daemon, 'daemon')
+        metadata_dict = '\0'.join(chain.from_iterable(metadata.items()))
+        metadata_dict += '\0'
+        cdef:
+            char *_service = service
+            char *_daemon = daemon
+            char *_metadata = metadata_dict
+
+        with nogil:
+            ret = rados_service_register(self.cluster, _service, _daemon, _metadata)
+        if ret != 0:
+            raise make_ex(ret, "error calling service_register()")
+
+    @requires(('metadata', dict))
+    def service_daemon_update(self, status):
+        status_dict = '\0'.join(chain.from_iterable(status.items()))
+        status_dict += '\0'
+        cdef:
+            char *_status = status_dict
+
+        with nogil:
+            ret = rados_service_update_status(self.cluster, _status)
+        if ret != 0:
+            raise make_ex(ret, "error calling service_daemon_update()")
 
 
 cdef class OmapIterator(object):
@@ -3327,8 +3407,8 @@ returned %d, but should return zero on success." % (self.name, ret))
             int prval = 0
 
         with nogil:
-            rados_read_op_omap_get_vals(_read_op.read_op, _start_after, _filter_prefix,
-                                        _max_return, &iter_addr,  &prval)
+            rados_read_op_omap_get_vals2(_read_op.read_op, _start_after, _filter_prefix,
+                                         _max_return, &iter_addr, NULL, &prval)
         it = OmapIterator(self)
         it.ctx = iter_addr
         return it, int(prval)
@@ -3354,8 +3434,8 @@ returned %d, but should return zero on success." % (self.name, ret))
             int prval = 0
 
         with nogil:
-            rados_read_op_omap_get_keys(_read_op.read_op, _start_after,
-                                        _max_return, &iter_addr,  &prval)
+            rados_read_op_omap_get_keys2(_read_op.read_op, _start_after,
+                                         _max_return, &iter_addr, NULL, &prval)
         it = OmapIterator(self)
         it.ctx = iter_addr
         return it, int(prval)
@@ -3561,6 +3641,155 @@ returned %d, but should return zero on success." % (self.name, ret))
             ret = rados_unlock(self.io, _key, _name, _cookie)
         if ret < 0:
             raise make_ex(ret, "Ioctx.rados_lock_exclusive(%s): failed to set lock %s on %s" % (self.name, name, key))
+
+    def set_osdmap_full_try(self):
+        """
+        Set global osdmap_full_try label to true
+        """
+        with nogil:
+            rados_set_osdmap_full_try(self.io)
+
+    def unset_osdmap_full_try(self):
+        """
+        Unset
+        """
+        with nogil:
+            rados_unset_osdmap_full_try(self.io)
+
+    def application_enable(self, app_name, force=False):
+        """
+        Enable an application on an OSD pool
+
+        :param app_name: application name
+        :type app_name: str
+        :param force: False if only a single app should exist per pool
+        :type expire_seconds: boool
+
+        :raises: :class:`Error`
+        """
+        app_name =  cstr(app_name, 'app_name')
+        cdef:
+            char *_app_name = app_name
+            int _force = (1 if force else 0)
+
+        with nogil:
+            ret = rados_application_enable(self.io, _app_name, _force)
+        if ret < 0:
+            raise make_ex(ret, "error enabling application")
+
+    def application_list(self):
+        """
+        Returns a list of enabled applications
+
+        :returns: list of app name string
+        """
+        cdef:
+            size_t length = 128
+            char *apps = NULL
+
+        try:
+            while True:
+                apps = <char *>realloc_chk(apps, length)
+                with nogil:
+                    ret = rados_application_list(self.io, apps, &length)
+                if ret == 0:
+                    return [decode_cstr(app) for app in
+                                apps[:length].split(b'\0') if app]
+                elif ret == -errno.ENOENT:
+                    return None
+                elif ret == -errno.ERANGE:
+                    pass
+                else:
+                    raise make_ex(ret, "error listing applications")
+        finally:
+            free(apps)
+
+    def application_metadata_set(self, app_name, key, value):
+        """
+        Sets application metadata on an OSD pool
+
+        :param app_name: application name
+        :type app_name: str
+        :param key: metadata key
+        :type key: str
+        :param value: metadata value
+        :type value: str
+
+        :raises: :class:`Error`
+        """
+        app_name =  cstr(app_name, 'app_name')
+        key =  cstr(key, 'key')
+        value =  cstr(value, 'value')
+        cdef:
+            char *_app_name = app_name
+            char *_key = key
+            char *_value = value
+
+        with nogil:
+            ret = rados_application_metadata_set(self.io, _app_name, _key,
+                                                 _value)
+        if ret < 0:
+            raise make_ex(ret, "error setting application metadata")
+
+    def application_metadata_remove(self, app_name, key):
+        """
+        Remove application metadata from an OSD pool
+
+        :param app_name: application name
+        :type app_name: str
+        :param key: metadata key
+        :type key: str
+
+        :raises: :class:`Error`
+        """
+        app_name =  cstr(app_name, 'app_name')
+        key =  cstr(key, 'key')
+        cdef:
+            char *_app_name = app_name
+            char *_key = key
+
+        with nogil:
+            ret = rados_application_metadata_remove(self.io, _app_name, _key)
+        if ret < 0:
+            raise make_ex(ret, "error removing application metadata")
+
+    def application_metadata_list(self, app_name):
+        """
+        Returns a list of enabled applications
+
+        :param app_name: application name
+        :type app_name: str
+        :returns: list of key/value tuples
+        """
+        app_name =  cstr(app_name, 'app_name')
+        cdef:
+            char *_app_name = app_name
+            size_t key_length = 128
+            size_t val_length = 128
+            char *c_keys = NULL
+            char *c_vals = NULL
+
+        try:
+            while True:
+                c_keys = <char *>realloc_chk(c_keys, key_length)
+                c_vals = <char *>realloc_chk(c_vals, val_length)
+                with nogil:
+                    ret = rados_application_metadata_list(self.io, _app_name,
+                                                          c_keys, &key_length,
+                                                          c_vals, &val_length)
+                if ret == 0:
+                    keys = [decode_cstr(key) for key in
+                                c_keys[:key_length].split(b'\0') if key]
+                    vals = [decode_cstr(val) for val in
+                                c_vals[:val_length].split(b'\0') if val]
+                    return zip(keys, vals)
+                elif ret == -errno.ERANGE:
+                    pass
+                else:
+                    raise make_ex(ret, "error listing application metadata")
+        finally:
+            free(c_keys)
+            free(c_vals)
 
 
 def set_object_locator(func):

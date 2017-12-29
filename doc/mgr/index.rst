@@ -26,8 +26,11 @@ sensible.
     :maxdepth: 1
 
     Installation and Configuration <administrator>
-    Dashboard <dashboard>
-    RESTful <restful>
-    Zabbix <zabbix>
     Writing plugins <plugins>
+    Dashboard plugin <dashboard>
+    Local pool plugin <localpool>
+    RESTful plugin <restful>
+    Zabbix plugin <zabbix>
+    Prometheus plugin <prometheus>
+    Influx plugin <influx>
 

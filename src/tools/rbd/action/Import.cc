@@ -37,7 +37,9 @@ struct ImportDiffContext {
   ImportDiffContext(librbd::Image *image, int fd, size_t size, bool no_progress)
     : image(image), fd(fd), size(size), pc("Importing image diff", no_progress),
       throttle((fd == STDIN_FILENO) ? 1 :
-               max(g_conf->rbd_concurrent_management_ops, 1), false), last_offset(0) {
+                  g_conf->get_val<int64_t>("rbd_concurrent_management_ops"),
+               false),
+      last_offset(0) {
   }
 
   void update_size(size_t new_size)
@@ -553,7 +555,46 @@ static int decode_and_set_image_option(int fd, uint64_t imageopt, librbd::ImageO
   return 0;
 }
 
-static int do_import_header(int fd, int import_format, uint64_t &size, librbd::ImageOptions& opts)
+static int do_import_metadata(int import_format, librbd::Image& image,
+                              const std::map<std::string, std::string> &imagemetas)
+{
+  int r = 0;
+
+  //v1 format
+  if (import_format == 1) {
+    return r;
+  }
+
+  for (std::map<std::string, std::string>::const_iterator it = imagemetas.begin();
+       it != imagemetas.end(); ++it) {
+    r = image.metadata_set(it->first, it->second);
+    if (r < 0)
+      return r;
+  }
+
+  return r;
+}
+
+static int decode_imagemeta(int fd, uint64_t length, std::map<std::string, std::string>* imagemetas)
+{
+  int r;
+  string key;
+  string value;
+
+  r = utils::read_string(fd, length, &key);
+  if (r < 0)
+    return r;
+
+  r = utils::read_string(fd, length, &value);
+  if (r < 0)
+    return r;
+
+  (*imagemetas)[key] = value;
+  return 0;
+}
+
+static int do_import_header(int fd, int import_format, uint64_t &size, librbd::ImageOptions& opts,
+                            std::map<std::string, std::string>* imagemetas)
 {
   // There is no header in v1 image.
   if (import_format == 1) {
@@ -578,7 +619,7 @@ static int do_import_header(int fd, int import_format, uint64_t &size, librbd::I
 
   while (r == 0) {
     __u8 tag;
-    uint64_t length;
+    uint64_t length = 0;
     r = read_tag(fd, RBD_EXPORT_IMAGE_END, image_format, &tag, &length);
     if (r < 0 || tag == RBD_EXPORT_IMAGE_END) {
       break;
@@ -592,6 +633,8 @@ static int do_import_header(int fd, int import_format, uint64_t &size, librbd::I
       r = decode_and_set_image_option(fd, RBD_IMAGE_OPTION_STRIPE_UNIT, opts);
     } else if (tag == RBD_EXPORT_IMAGE_STRIPE_COUNT) {
       r = decode_and_set_image_option(fd, RBD_IMAGE_OPTION_STRIPE_COUNT, opts);
+    } else if (tag == RBD_EXPORT_IMAGE_META) {
+      r = decode_imagemeta(fd, length, imagemetas);
     } else {
       std::cerr << "rbd: invalid tag in image properties zone: " << tag << "Skip it."
                 << std::endl;
@@ -653,7 +696,7 @@ static int do_import_v1(int fd, librbd::Image &image, uint64_t size,
     throttle.reset(new SimpleThrottle(1, false));
   } else {
     throttle.reset(new SimpleThrottle(
-                     max(g_conf->rbd_concurrent_management_ops, 1), false));
+      g_conf->get_val<int64_t>("rbd_concurrent_management_ops"), false));
   }
 
   reqlen = min<uint64_t>(reqlen, size);
@@ -741,12 +784,13 @@ static int do_import(librados::Rados &rados, librbd::RBD &rbd,
   int fd, r;
   struct stat stat_buf;
   utils::ProgressContext pc("Importing image", no_progress);
+  std::map<std::string, std::string> imagemetas;
 
   assert(imgname);
 
   uint64_t order;
   if (opts.get(RBD_IMAGE_OPTION_ORDER, &order) != 0) {
-    order = g_conf->rbd_default_order;
+    order = g_conf->get_val<int64_t>("rbd_default_order");
   }
 
   // try to fill whole imgblklen blocks for sparsification
@@ -794,7 +838,7 @@ static int do_import(librados::Rados &rados, librbd::RBD &rbd,
 #endif
   }
 
-  r = do_import_header(fd, import_format, size, opts);
+  r = do_import_header(fd, import_format, size, opts, &imagemetas);
   if (r < 0) {
     std::cerr << "rbd: import header failed." << std::endl;
     goto done;
@@ -809,6 +853,12 @@ static int do_import(librados::Rados &rados, librbd::RBD &rbd,
   r = rbd.open(io_ctx, image, imgname);
   if (r < 0) {
     std::cerr << "rbd: failed to open image" << std::endl;
+    goto err;
+  }
+
+  r = do_import_metadata(import_format, image, imagemetas);
+  if (r < 0) {
+    std::cerr << "rbd: failed to import image-meta" << std::endl;
     goto err;
   }
 

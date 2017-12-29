@@ -8,12 +8,13 @@ fi
 ARGS=""
 if which ccache ; then
     echo "enabling ccache"
-    ARGS+="-DWITH_CCACHE=ON"
+    ARGS="$ARGS -DWITH_CCACHE=ON"
 fi
 
 mkdir build
 cd build
-cmake -DBOOST_J=$(nproc) $ARGS "$@" ..
+NPROC=${NPROC:-$(nproc)}
+cmake -DBOOST_J=$NPROC $ARGS "$@" ..
 
 # minimal config to find plugins
 cat <<EOF > ceph.conf

@@ -45,9 +45,9 @@ class MMDSCacheRejoin : public Message {
 
   // -- types --
   struct inode_strong { 
-    uint32_t nonce;
-    int32_t caps_wanted;
-    int32_t filelock, nestlock, dftlock;
+    uint32_t nonce = 0;
+    int32_t caps_wanted = 0;
+    int32_t filelock = 0, nestlock = 0, dftlock = 0;
     inode_strong() {}
     inode_strong(int n, int cw, int dl, int nl, int dftl) :
       nonce(n), caps_wanted(cw),
@@ -70,8 +70,8 @@ class MMDSCacheRejoin : public Message {
   WRITE_CLASS_ENCODER(inode_strong)
 
   struct dirfrag_strong {
-    uint32_t nonce;
-    int8_t  dir_rep;
+    uint32_t nonce = 0;
+    int8_t  dir_rep = 0;
     dirfrag_strong() {}
     dirfrag_strong(int n, int dr) : nonce(n), dir_rep(dr) {}
     void encode(bufferlist &bl) const {
@@ -197,8 +197,8 @@ class MMDSCacheRejoin : public Message {
   map<dirfrag_t, map<string_snap_t, slave_reqid> > xlocked_dentries;
   
   MMDSCacheRejoin() :
-    Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION)
-  {}
+    Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION),
+    op(0) {}
   MMDSCacheRejoin(int o) : 
     Message(MSG_MDS_CACHEREJOIN, HEAD_VERSION, COMPAT_VERSION),
     op(o) {}

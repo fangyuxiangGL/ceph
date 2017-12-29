@@ -479,5 +479,55 @@ void TrashImageSpec::dump(Formatter *f) const {
   f->dump_unsigned("deferment_end_time", deferment_end_time);
 }
 
+void MirrorImageMap::encode(bufferlist &bl) const {
+  ENCODE_START(1, 1, bl);
+  ::encode(instance_id, bl);
+  ::encode(mapped_time, bl);
+  ::encode(data, bl);
+  ENCODE_FINISH(bl);
+}
+
+void MirrorImageMap::decode(bufferlist::iterator &it) {
+  DECODE_START(1, it);
+  ::decode(instance_id, it);
+  ::decode(mapped_time, it);
+  ::decode(data, it);
+  DECODE_FINISH(it);
+}
+
+void MirrorImageMap::dump(Formatter *f) const {
+  f->dump_string("instance_id", instance_id);
+  f->dump_stream("mapped_time") << mapped_time;
+
+  std::stringstream data_ss;
+  data.hexdump(data_ss);
+  f->dump_string("data", data_ss.str());
+}
+
+void MirrorImageMap::generate_test_instances(
+  std::list<MirrorImageMap*> &o) {
+  bufferlist data;
+  data.append(std::string(128, '1'));
+
+  o.push_back(new MirrorImageMap("uuid-123", utime_t(), data));
+  o.push_back(new MirrorImageMap("uuid-abc", utime_t(), data));
+}
+
+bool MirrorImageMap::operator==(const MirrorImageMap &rhs) const {
+  return instance_id == rhs.instance_id && mapped_time == rhs.mapped_time &&
+    data.contents_equal(rhs.data);
+}
+
+bool MirrorImageMap::operator<(const MirrorImageMap &rhs) const {
+  return instance_id < rhs.instance_id ||
+        (instance_id == rhs.instance_id && mapped_time < rhs.mapped_time);
+}
+
+std::ostream& operator<<(std::ostream& os,
+                         const MirrorImageMap &image_map) {
+  return os << "[" << "instance_id=" << image_map.instance_id << ", mapped_time="
+            << image_map.mapped_time << "]";
+}
+
 } // namespace rbd
 } // namespace cls

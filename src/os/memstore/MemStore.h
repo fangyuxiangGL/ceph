@@ -21,7 +21,6 @@
 
 #include "include/unordered_map.h"
 #include "include/memory.h"
-#include "include/Spinlock.h"
 #include "common/Finisher.h"
 #include "common/RefCountedObj.h"
 #include "common/RWLock.h"
@@ -96,7 +95,7 @@ public:
   struct PageSetObject;
   struct Collection : public CollectionImpl {
     coll_t cid;
-    int bits;
+    int bits = 0;
     CephContext *cct;
     bool use_page_set;
     ceph::unordered_map<ghobject_t, ObjectRef> object_hash;  ///< for lookup
@@ -279,6 +278,11 @@ public:
   }
   bool needs_journal() override {
     return false;
+  }
+
+  int get_devices(set<string> *ls) override {
+    // no devices for us!
+    return 0;
   }
 
   int statfs(struct store_statfs_t *buf) override;

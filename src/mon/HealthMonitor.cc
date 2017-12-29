@@ -23,9 +23,7 @@
 #include "mon/Monitor.h"
 #include "mon/HealthService.h"
 #include "mon/HealthMonitor.h"
-#include "mon/DataHealthService.h"
 
-#include "messages/MMonHealth.h"
 #include "messages/MMonHealthChecks.h"
 
 #include "common/Formatter.h"
@@ -120,10 +118,11 @@ void HealthMonitor::encode_pending(MonitorDBStore::TransactionRef t)
     }
     pending_health.merge(p.second);
   }
-  for (auto p : pending_health.checks) {
+  for (auto &p : pending_health.checks) {
     p.second.summary = boost::regex_replace(
       p.second.summary,
-      boost::regex("%num%"), stringify(names[p.first].size()));
+      boost::regex("%hasorhave%"),
+      names[p.first].size() > 1 ? "have" : "has");
     p.second.summary = boost::regex_replace(
       p.second.summary,
       boost::regex("%names%"), stringify(names[p.first]));
@@ -141,7 +140,7 @@ void HealthMonitor::encode_pending(MonitorDBStore::TransactionRef t)
   encode_health(pending_health, t);
 }
 
-version_t HealthMonitor::get_trim_to()
+version_t HealthMonitor::get_trim_to() const
 {
   // we don't actually need *any* old states, but keep a few.
   if (version > 5) {
@@ -152,34 +151,27 @@ version_t HealthMonitor::get_trim_to()
 
 bool HealthMonitor::preprocess_query(MonOpRequestRef op)
 {
-  switch (op->get_req()->get_type()) {
-  case MSG_MON_HEALTH:
-    {
-      MMonHealth *hm = static_cast<MMonHealth*>(op->get_req());
-      int service_type = hm->get_service_type();
-      if (services.count(service_type) == 0) {
-	dout(1) << __func__ << " service type " << service_type
-		<< " not registered -- drop message!" << dendl;
-	return false;
-      }
-      return services[service_type]->service_dispatch(op);
-    }
-
-  case MSG_MON_HEALTH_CHECKS:
-    return preprocess_health_checks(op);
-  }
   return false;
 }
 
 bool HealthMonitor::prepare_update(MonOpRequestRef op)
 {
-  return false;
+  Message *m = op->get_req();
+  dout(7) << "prepare_update " << *m
+	  << " from " << m->get_orig_source_inst() << dendl;
+  switch (m->get_type()) {
+  case MSG_MON_HEALTH_CHECKS:
+    return prepare_health_checks(op);
+  default:
+    return false;
+  }
 }
 
-bool HealthMonitor::preprocess_health_checks(MonOpRequestRef op)
+bool HealthMonitor::prepare_health_checks(MonOpRequestRef op)
 {
   MMonHealthChecks *m = static_cast<MMonHealthChecks*>(op->get_req());
-  quorum_checks[m->get_source().num()] = m->health_checks;
+  // no need to check if it's changed, the peon has done so
+  quorum_checks[m->get_source().num()] = std::move(m->health_checks);
   return true;
 }
 
@@ -193,10 +185,11 @@ void HealthMonitor::tick()
   if (check_member_health()) {
     changed = true;
   }
-  if (mon->is_leader()) {
-    if (check_leader_health()) {
-      changed = true;
-    }
+  if (!mon->is_leader()) {
+    return;
+  }
+  if (check_leader_health()) {
+    changed = true;
   }
   if (changed) {
     propose_pending();
@@ -236,7 +229,7 @@ bool HealthMonitor::check_member_health()
   } else if (stats.fs_stats.avail_percent <= g_conf->mon_data_avail_warn) {
     stringstream ss, ss2;
     ss << "mon%plurals% %names% %isorare% low on available space";
-    auto& d = next.add("MON_DISK_LOW", HEALTH_ERR, ss.str());
+    auto& d = next.add("MON_DISK_LOW", HEALTH_WARN, ss.str());
     ss2 << "mon." << mon->name << " has " << stats.fs_stats.avail_percent
 	<< "% avail";
     d.detail.push_back(ss2.str());
@@ -250,20 +243,6 @@ bool HealthMonitor::check_member_health()
 	<< " >= mon_data_size_warn ("
 	<< prettybyte_t(g_conf->mon_data_size_warn) << ")";
     d.detail.push_back(ss2.str());
-  }
-
-  auto p = quorum_checks.find(mon->rank);
-  if (p == quorum_checks.end() ||
-      p->second != next) {
-    if (mon->is_leader()) {
-      // prepare to propose
-      quorum_checks[mon->rank] = next;
-      changed = true;
-    } else {
-      // tell the leader
-      mon->messenger->send_message(new MMonHealthChecks(next),
-				   mon->monmap->get_inst(mon->get_leader()));
-    }
   }
 
   // OSD_NO_DOWN_OUT_INTERVAL
@@ -283,11 +262,32 @@ bool HealthMonitor::check_member_health()
     if (g_conf->mon_warn_on_osd_down_out_interval_zero &&
         g_conf->mon_osd_down_out_interval == 0) {
       ostringstream ss, ds;
-      ss << "mon%plurals% %names %hasorhave% mon_osd_down_out_interval set to 0";
+      ss << "mon%plurals% %names% %hasorhave% mon_osd_down_out_interval set to 0";
       auto& d = next.add("OSD_NO_DOWN_OUT_INTERVAL", HEALTH_WARN, ss.str());
       ds << "mon." << mon->name << " has mon_osd_down_out_interval set to 0";
       d.detail.push_back(ds.str());
     }
+  }
+
+  auto p = quorum_checks.find(mon->rank);
+  if (p == quorum_checks.end()) {
+    if (next.empty()) {
+      return false;
+    }
+  } else {
+    if (p->second == next) {
+      return false;
+    }
+  }
+
+  if (mon->is_leader()) {
+    // prepare to propose
+    quorum_checks[mon->rank] = next;
+    changed = true;
+  } else {
+    // tell the leader
+    mon->messenger->send_message(new MMonHealthChecks(next),
+                                 mon->monmap->get_inst(mon->get_leader()));
   }
 
   return changed;
@@ -366,8 +366,7 @@ bool HealthMonitor::check_leader_health()
 	if (!warns.empty())
 	  ss << ",";
       }
-      auto& d = next.add("MON_CLOCK_SKEW", HEALTH_WARN,
-			 "monitor clock skew detected");
+      auto& d = next.add("MON_CLOCK_SKEW", HEALTH_WARN, ss.str());
       d.detail.swap(details);
     }
   }

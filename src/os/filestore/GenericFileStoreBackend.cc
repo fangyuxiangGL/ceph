@@ -87,6 +87,27 @@ GenericFileStoreBackend::GenericFileStoreBackend(FileStore *fs):
     }
     ::close(fd);
   }
+  // journal rotational?
+  {
+    // NOTE: the below won't work on btrfs; we'll assume rotational.
+    string fn = get_journal_path();
+    int fd = ::open(fn.c_str(), O_RDONLY);
+    if (fd < 0) {
+      return;
+    }
+    char partition[PATH_MAX], devname[PATH_MAX];
+    int r = get_device_by_fd(fd, partition, devname, sizeof(devname));
+    if (r < 0) {
+      dout(1) << "unable to get journal device name for "
+              << get_journal_path() << ": " << cpp_strerror(r) << dendl;
+      m_journal_rotational = true;
+    } else {
+      m_journal_rotational = block_device_is_rotational(devname);
+      dout(20) << __func__ << " journal devname " << devname
+               << " journal rotational " << (int)m_journal_rotational << dendl;
+    }
+    ::close(fd);
+  }
 }
 
 int GenericFileStoreBackend::detect_features()
@@ -310,7 +331,7 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap->fm_length = len + start % CEPH_PAGE_SIZE;
   fiemap->fm_flags = FIEMAP_FLAG_SYNC; /* flush extents to disk if needed */
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
   ret = -ENOTSUP;
   goto done_err;
 #else
@@ -334,7 +355,7 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap->fm_extent_count = fiemap->fm_mapped_extents;
   fiemap->fm_mapped_extents = 0;
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
   ret = -ENOTSUP;
   goto done_err;
 #else

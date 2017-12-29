@@ -177,8 +177,8 @@ int do_export_diff_fd(librbd::Image& image, const char *fromsnapname,
     }
   }
   ExportDiffContext edc(&image, fd, info.size,
-                        g_conf->rbd_concurrent_management_ops, no_progress,
-			export_format);
+                        g_conf->get_val<int64_t>("rbd_concurrent_management_ops"),
+                        no_progress, export_format);
   r = image.diff_iterate2(fromsnapname, 0, info.size, true, whole_object,
                           &C_ExportDiff::export_diff_cb, (void *)&edc);
   if (r < 0) {
@@ -371,6 +371,8 @@ private:
   int m_fd;
 };
 
+const uint32_t MAX_KEYS = 64;
+
 static int do_export_v2(librbd::Image& image, librbd::image_info_t &info, int fd,
 		        uint64_t period, int max_concurrent_ops, utils::ProgressContext &pc)
 {
@@ -413,6 +415,45 @@ static int do_export_v2(librbd::Image& image, librbd::image_info_t &info, int fd
   ::encode(tag, bl);
   ::encode(length, bl);
   ::encode(stripe_count, bl);
+
+  //retrieve metadata of image
+  std::map<std::string, string> imagemetas;
+  std::string last_key;
+  bool more_results = true;
+  while (more_results) {
+    std::map<std::string, bufferlist> pairs;
+    r = image.metadata_list(last_key, MAX_KEYS, &pairs);
+    if (r < 0) {
+      std::cerr << "failed to retrieve metadata of image : " << cpp_strerror(r)
+                << std::endl;
+      return r;
+    }
+
+    if (!pairs.empty()) {
+      last_key = pairs.rbegin()->first;
+
+      for (auto kv : pairs) {
+        std::string key = kv.first;
+        std::string val(kv.second.c_str(), kv.second.length());
+        imagemetas[key] = val;
+      }
+    }
+    more_results = (pairs.size() == MAX_KEYS);
+  }
+
+  //encode imageMeta key and value
+  for (std::map<std::string, string>::iterator it = imagemetas.begin();
+       it != imagemetas.end(); ++it) {
+    string key = it->first;
+    string value = it->second;
+
+    tag = RBD_EXPORT_IMAGE_META;
+    length = key.length() + value.length() + 4 * 2;
+    ::encode(tag, bl);
+    ::encode(length, bl);
+    ::encode(key, bl);
+    ::encode(value, bl);
+  }
 
   // encode end tag
   tag = RBD_EXPORT_IMAGE_END;
@@ -509,7 +550,7 @@ static int do_export(librbd::Image& image, const char *path, bool no_progress, i
     fd = STDOUT_FILENO;
     max_concurrent_ops = 1;
   } else {
-    max_concurrent_ops = max(g_conf->rbd_concurrent_management_ops, 1);
+    max_concurrent_ops = g_conf->get_val<int64_t>("rbd_concurrent_management_ops");
     fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) {
       return -errno;

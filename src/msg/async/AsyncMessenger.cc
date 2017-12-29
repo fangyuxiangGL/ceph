@@ -50,7 +50,7 @@ class Processor::C_processor_accept : public EventCallback {
 
  public:
   explicit C_processor_accept(Processor *p): pro(p) {}
-  void do_request(int id) override {
+  void do_request(uint64_t id) override {
     pro->accept();
   }
 };
@@ -232,7 +232,7 @@ class C_handle_reap : public EventCallback {
 
   public:
   explicit C_handle_reap(AsyncMessenger *m): msgr(m) {}
-  void do_request(int id) override {
+  void do_request(uint64_t id) override {
     // judge whether is a time event
     msgr->reap_dead();
   }
@@ -257,7 +257,6 @@ AsyncMessenger::AsyncMessenger(CephContext *cct, entity_name_t name,
   else if (type.find("dpdk") != std::string::npos)
     transport_type = "dpdk";
 
-  ceph_spin_init(&global_seq_lock);
   StackSingleton *single;
   cct->lookup_or_create_singleton_object<StackSingleton>(single, "AsyncMessenger::NetworkStack::"+transport_type);
   single->ready(transport_type);
@@ -553,7 +552,7 @@ ConnectionRef AsyncMessenger::get_loopback_connection()
 
 int AsyncMessenger::_send_message(Message *m, const entity_inst_t& dest)
 {
-  FUNCTRACE();
+  FUNCTRACE(cct);
   assert(m);
 
   if (m->get_type() == CEPH_MSG_OSD_OP)

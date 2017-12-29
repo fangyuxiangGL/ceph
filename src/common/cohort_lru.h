@@ -136,6 +136,7 @@ namespace cohort {
 	for (int ix = 0; ix < n_lanes; ++ix,
 	       lane_ix = next_evict_lane()) {
 	  Lane& lane = qlane[lane_ix];
+	  lane.lock.lock();
 	  /* if object at LRU has refcnt==1, it may be reclaimable */
 	  Object* o = &(lane.q.back());
 	  if (can_reclaim(o)) {
@@ -156,7 +157,6 @@ namespace cohort {
 	      return o;
 	    } else {
 	      // XXX can't make unreachable (means what?)
-	      lane.lock.lock();
 	      --(o->lru_refcnt);
 	      o->lru_flags &= ~FLAG_EVICTING;
 	      /* unlock in next block */
@@ -305,7 +305,7 @@ namespace cohort {
       struct Latch {
 	Partition* p;
 	LK* lock;
-	insert_commit_data commit_data;
+	insert_commit_data commit_data{};
 
 	Latch() : p(nullptr), lock(nullptr) {}
       };
@@ -399,7 +399,7 @@ namespace cohort {
 	  v = lat.p->cache[slot];
 	  if (v) {
 	    if (CEQ()(*v, k)) {
-	      if (flags & (FLAG_LOCK|FLAG_UNLOCK))
+	      if ((flags & FLAG_LOCK) && (flags & FLAG_UNLOCK))
 		lat.lock->unlock();
 	      return v;
 	    }
@@ -417,7 +417,7 @@ namespace cohort {
 	    lat.p->cache[slot] = v;
 	  }
 	}
-	if (flags & (FLAG_LOCK|FLAG_UNLOCK))
+	if ((flags & FLAG_LOCK) && (flags & FLAG_UNLOCK))
 	  lat.lock->unlock();
 	return v;
       } /* find_latch */

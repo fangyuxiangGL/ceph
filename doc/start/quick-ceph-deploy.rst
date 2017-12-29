@@ -101,6 +101,7 @@ configuration details, perform the following steps using ``ceph-deploy``.
    - ``ceph.bootstrap-osd.keyring``
    - ``ceph.bootstrap-mds.keyring``
    - ``ceph.bootstrap-rgw.keyring``
+   - ``ceph.bootstrap-rbd.keyring``
 
 .. note:: If this process fails with a message similar to "Unable to
    find /etc/ceph/ceph.client.admin.keyring", please ensure that the
@@ -118,9 +119,9 @@ configuration details, perform the following steps using ``ceph-deploy``.
 
 	ceph-deploy admin node1 node2 node3
 
-#. Deploy a manager daemon.::
+#. Deploy a manager daemon. (Required only for luminous+ builds)::
 
-     ceph-deploy mgr create node1
+     ceph-deploy mgr create node1  *Required only for luminous+ builds, i.e >= 12.x builds*
 
 #. Add three OSDs. For the purposes of these instructions, we assume you have an
    unused disk in each node called ``/dev/vdb``.  *Be sure that the device is not currently in use and does not contain any important data.*

@@ -12,14 +12,16 @@
  * 
  */
 
+#include "common/debug.h"
+#include "mon/health_check.h"
 
 #include "MDSMap.h"
 
 #include <sstream>
 using std::stringstream;
 
-#include "mon/health_check.h"
-
+#define dout_context g_ceph_context
+#define dout_subsys ceph_subsys_
 
 // features
 CompatSet get_mdsmap_compat_set_all() {
@@ -151,11 +153,9 @@ void MDSMap::dump(Formatter *f) const
   for (set<mds_rank_t>::const_iterator p = in.begin(); p != in.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
-  f->open_object_section("up");
+  f->open_array_section("up");
   for (map<mds_rank_t,mds_gid_t>::const_iterator p = up.begin(); p != up.end(); ++p) {
-    char s[14];
-    sprintf(s, "mds_%d", int(p->first));
-    f->dump_int(s, p->second);
+    f->dump_int("mds", p->first);
   }
   f->close_section();
   f->open_array_section("failed");
@@ -170,11 +170,9 @@ void MDSMap::dump(Formatter *f) const
   for (set<mds_rank_t>::const_iterator p = stopped.begin(); p != stopped.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
-  f->open_object_section("info");
+  f->open_array_section("info");
   for (map<mds_gid_t,mds_info_t>::const_iterator p = mds_info.begin(); p != mds_info.end(); ++p) {
-    char s[25]; // 'gid_' + len(str(ULLONG_MAX)) + '\0'
-    sprintf(s, "gid_%llu", (long long unsigned)p->first);
-    f->open_object_section(s);
+    f->open_object_section("info_item");
     p->second.dump(f);
     f->close_section();
   }
@@ -408,29 +406,9 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
 
 void MDSMap::get_health_checks(health_check_map_t *checks) const
 {
-  // FS_WITH_FAILED_MDS
-  // MDS_FAILED
-  if (!failed.empty()) {
-    health_check_t& fscheck = checks->add(
-      "FS_WITH_FAILED_MDS", HEALTH_WARN,
-      "%num% filesystem%plurals% %isorare% have a failed mds daemon");
-    ostringstream ss;
-    ss << "fs " << fs_name << " has " << failed.size() << " failed mds"
-       << (failed.size() > 1 ? "s" : "");
-    fscheck.detail.push_back(ss.str());
-
-    health_check_t& check = checks->add("MDS_FAILED", HEALTH_ERR,
-					 "%num% mds daemon%plurals% down");
-    for (auto p : failed) {
-      std::ostringstream oss;
-      oss << "fs " << fs_name << " mds." << p << " has failed";
-      check.detail.push_back(oss.str());
-    }
-  }
-
-  // MDS_DAMAGED
+  // MDS_DAMAGE
   if (!damaged.empty()) {
-    health_check_t& check = checks->add("MDS_DAMAGED", HEALTH_ERR,
+    health_check_t& check = checks->get_or_add("MDS_DAMAGE", HEALTH_ERR,
 					"%num% mds daemon%plurals% damaged");
     for (auto p : damaged) {
       std::ostringstream oss;
@@ -440,9 +418,8 @@ void MDSMap::get_health_checks(health_check_map_t *checks) const
   }
 
   // FS_DEGRADED
-  // MDS_DEGRADED
   if (is_degraded()) {
-    health_check_t& fscheck = checks->add(
+    health_check_t& fscheck = checks->get_or_add(
       "FS_DEGRADED", HEALTH_WARN,
       "%num% filesystem%plurals% %isorare% degraded");
     ostringstream ss;
@@ -468,12 +445,6 @@ void MDSMap::get_health_checks(health_check_map_t *checks) const
 	ss << " is reconnecting to clients";
       if (ss.str().length())
 	detail.push_back(ss.str());
-    }
-    if (!detail.empty()) {
-      health_check_t& check = checks->add(
-	"MDS_DEGRADED", HEALTH_WARN,
-	"%num% mds daemon%plurals% %isorare% degraded");
-      check.detail.insert(check.detail.end(), detail.begin(), detail.end());
     }
   }
 }
@@ -541,7 +512,13 @@ void MDSMap::mds_info_t::decode(bufferlist::iterator& bl)
   DECODE_FINISH(bl);
 }
 
-
+std::string MDSMap::mds_info_t::human_name() const
+{
+  // Like "daemon mds.myhost restarted", "Activating daemon mds.myhost"
+  std::ostringstream out;
+  out << "daemon mds." << name;
+  return out.str();
+}
 
 void MDSMap::encode(bufferlist& bl, uint64_t features) const
 {
@@ -654,6 +631,23 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
   ::encode(balancer, bl);
   ::encode(standby_count_wanted, bl);
   ENCODE_FINISH(bl);
+}
+
+void MDSMap::sanitize(const std::function<bool(int64_t pool)>& pool_exists)
+{
+  /* Before we did stricter checking, it was possible to remove a data pool
+   * without also deleting it from the MDSMap. Check for that here after
+   * decoding the data pools.
+   */
+
+  for (auto it = data_pools.begin(); it != data_pools.end();) {
+    if (!pool_exists(*it)) {
+      dout(0) << "removed non-existant data pool " << *it << " from MDSMap" << dendl;
+      it = data_pools.erase(it);
+    } else {
+      it++;
+    }
+  }
 }
 
 void MDSMap::decode(bufferlist::iterator& p)

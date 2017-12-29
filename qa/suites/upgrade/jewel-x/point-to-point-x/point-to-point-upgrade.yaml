@@ -20,6 +20,7 @@ overrides:
     conf:
       mon:
         mon debug unsafe allow tier with nonempty snaps: true
+        mon warn on pool no app: false
       osd:
         osd map max advance: 1000
 roles:
@@ -75,14 +76,16 @@ tasks:
 - install.upgrade:
     mon.a:
     mon.b:
-- print: "**** done branch: -x install.upgrade on mon.a and mon.b"
+    client.1:
+- print: "**** done branch: -x install.upgrade on mon.a, mon.b, and client.1"
 - parallel:
    - workload_x
    - upgrade-sequence_x
 - print: "**** done parallel -x branch"
+- exec:
+    osd.0:
+      - ceph osd set-require-min-compat-client luminous
 # Run librados tests on the -x upgraded cluster
-- install.upgrade:
-    client.1:
 - workunit:
     branch: jewel
     clients:
@@ -221,6 +224,5 @@ upgrade-sequence_x:
    - exec:
        osd.0:
          - ceph osd require-osd-release luminous
-         - ceph osd set-require-min-compat-client luminous
    - ceph.healthy:
    - print: "**** done ceph.restart all -x branch mds/osd/mon"

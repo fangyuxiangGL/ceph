@@ -16,10 +16,14 @@
 
 #include <Python.h>
 
+#include <pthread.h>
+
 #include "include/types.h"
+#include "include/compat.h"
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "common/errno.h"
+#include "common/pick_address.h"
 #include "global/global_init.h"
 
 #include "mgr/MgrStandby.h"
@@ -37,6 +41,8 @@ static void usage()
  */
 int main(int argc, const char **argv)
 {
+  ceph_pthread_setname(pthread_self(), "ceph-mgr");
+
   vector<const char*> args;
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
@@ -45,12 +51,14 @@ int main(int argc, const char **argv)
 			 CODE_ENVIRONMENT_DAEMON, 0,
 			 "mgr_data");
   // For consumption by KeyRing::from_ceph_context in MonClient
-  g_conf->set_val("keyring", "$mgr_data/keyring", false);
+  g_conf->set_val_or_die("keyring", "$mgr_data/keyring");
 
   // Handle --help
   if ((args.size() == 1 && (std::string(args[0]) == "--help" || std::string(args[0]) == "-h"))) {
     usage();
   }
+
+  pick_addresses(g_ceph_context, CEPH_PICK_ADDRESS_PUBLIC);
 
   global_init_daemonize(g_ceph_context);
   global_init_chdir(g_ceph_context);

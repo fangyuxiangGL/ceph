@@ -291,8 +291,6 @@ int CrushCompiler::decompile_choose_args(const std::pair<const long unsigned int
 
 int CrushCompiler::decompile(ostream &out)
 {
-  crush.cleanup_classes();
-
   out << "# begin crush map\n";
 
   // only dump tunables if they differ from the defaults
@@ -316,10 +314,12 @@ int CrushCompiler::decompile(ostream &out)
 
   out << "\n# devices\n";
   for (int i=0; i<crush.get_max_devices(); i++) {
-    out << "device " << i << " ";
-    print_item_name(out, i, crush);
-    print_item_class(out, i, crush);
-    out << "\n";
+    const char *name = crush.get_item_name(i);
+    if (name) {
+      out << "device " << i << " " << name;
+      print_item_class(out, i, crush);
+      out << "\n";
+    }
   }
   
   out << "\n# types\n";
@@ -350,7 +350,10 @@ int CrushCompiler::decompile(ostream &out)
     if (crush.get_rule_name(i))
       print_rule_name(out, i, crush);
     out << " {\n";
-    out << "\truleset " << crush.get_rule_mask_ruleset(i) << "\n";
+    out << "\tid " << i << "\n";
+    if (i != crush.get_rule_mask_ruleset(i)) {
+      out << "\t# WARNING: ruleset " << crush.get_rule_mask_ruleset(i) << " != id " << i << "; this will not recompile to the same map\n";
+    }
 
     switch (crush.get_rule_mask_type(i)) {
     case CEPH_PG_TYPE_REPLICATED:
@@ -586,11 +589,10 @@ int CrushCompiler::parse_bucket(iter_t const& i)
       if (verbose) err << "bucket " << name << " id " << maybe_id;
       if (sub->children.size() > 2) {
         string class_name = string_node(sub->children[3]);
-        if (!crush.class_exists(class_name)) {
-          err << " unknown device class '" << class_name << "'" << std::endl;
-          return -EINVAL;
-        }
-        int cid = crush.get_class_id(class_name);
+        // note that we do not verify class existence here,
+        // as this bucket might come from an empty shadow tree
+        // which currently has no OSDs but is still referenced by a rule!
+        int cid = crush.get_or_create_class_id(class_name);
         if (class_id.count(cid) != 0) {
           err << "duplicate device class " << class_name << " for bucket " << name << std::endl;
           return -ERANGE;
@@ -731,7 +733,7 @@ int CrushCompiler::parse_bucket(iter_t const& i)
   }
 
   for (auto &i : class_id)
-    crush.class_bucket[id][i.first] = i.second;
+    class_bucket[id][i.first] = i.second;
 
   if (verbose) err << "bucket " << name << " (" << id << ") " << size << " items and weight "
 		   << (float)bucketweight / (float)0x10000 << std::endl;
@@ -740,7 +742,9 @@ int CrushCompiler::parse_bucket(iter_t const& i)
   item_weight[id] = bucketweight;
   
   assert(id != 0);
-  int r = crush.add_bucket(id, alg, hash, type, size, &items[0], &weights[0], NULL);
+  int idout;
+  int r = crush.add_bucket(id, alg, hash, type, size,
+                           &items[0], &weights[0], &idout);
   if (r < 0) {
     if (r == -EEXIST)
       err << "Duplicate bucket id " << id << std::endl;
@@ -754,8 +758,6 @@ int CrushCompiler::parse_bucket(iter_t const& i)
 
 int CrushCompiler::parse_rule(iter_t const& i)
 {
-  crush.populate_classes();
-
   int start;  // rule name is optional!
  
   string rname = string_node(i->children[1]);
@@ -770,7 +772,7 @@ int CrushCompiler::parse_rule(iter_t const& i)
     start = 3;
   }
 
-  int ruleset = int_node(i->children[start]);
+  int ruleno = int_node(i->children[start]);
 
   string tname = string_node(i->children[start+2]);
   int type;
@@ -786,8 +788,17 @@ int CrushCompiler::parse_rule(iter_t const& i)
   
   int steps = i->children.size() - start - 8;
   //err << "num steps " << steps << std::endl;
-  
-  int ruleno = crush.add_rule(steps, ruleset, type, minsize, maxsize, -1);
+
+  if (crush.rule_exists(ruleno)) {
+    err << "rule " << ruleno << " already exists" << std::endl;
+    return -1;
+  }
+  int r = crush.add_rule(ruleno, steps, type, minsize, maxsize);
+  if (r != ruleno) {
+    err << "unable to add rule id " << ruleno << " for rule '" << rname
+	<< "'" << std::endl;
+    return -1;
+  }
   if (rname.length()) {
     crush.set_rule_name(ruleno, rname.c_str());
     rule_id[rname] = ruleno;
@@ -1014,8 +1025,13 @@ int CrushCompiler::parse_choose_args(iter_t const& i)
     err << choose_arg_index << " duplicated" << std::endl;
     return -1;
   }
+  const auto max_buckets = crush.get_max_buckets();
+  if (max_buckets < 0) {
+    err << "get_max_buckets() returned error" << std::endl;
+    return -1;
+  }
   crush_choose_arg_map arg_map;
-  arg_map.size = crush.get_max_buckets();
+  arg_map.size = max_buckets;
   arg_map.args = (crush_choose_arg *)calloc(arg_map.size, sizeof(crush_choose_arg));
   for (iter_t p = i->children.begin() + 2; p != i->children.end(); p++) {
     int r = 0;
@@ -1051,7 +1067,7 @@ void CrushCompiler::find_used_bucket_ids(iter_t const& i)
 int CrushCompiler::parse_crush(iter_t const& i) 
 { 
   find_used_bucket_ids(i);
-
+  bool saw_rule = false;
   for (iter_t p = i->children.begin(); p != i->children.end(); p++) {
     int r = 0;
     switch (p->value.id().to_long()) {
@@ -1064,10 +1080,18 @@ int CrushCompiler::parse_crush(iter_t const& i)
     case crush_grammar::_bucket_type: 
       r = parse_bucket_type(p);
       break;
-    case crush_grammar::_bucket: 
+    case crush_grammar::_bucket:
+      if (saw_rule) {
+	err << "buckets must be defined before rules" << std::endl;
+	return -1;
+      }
       r = parse_bucket(p);
       break;
-    case crush_grammar::_crushrule: 
+    case crush_grammar::_crushrule:
+      if (!saw_rule) {
+	saw_rule = true;
+	crush.populate_classes(class_bucket);
+      }
       r = parse_rule(p);
       break;
     case crush_grammar::_choose_args:
@@ -1082,7 +1106,6 @@ int CrushCompiler::parse_crush(iter_t const& i)
   }
 
   //err << "max_devices " << crush.get_max_devices() << std::endl;
-  crush.cleanup_classes();
   crush.finalize();
 
   return 0;

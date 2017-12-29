@@ -41,10 +41,12 @@ extern "C" {
 
 #define LIBRBD_SUPPORTS_AIO_FLUSH 1
 #define LIBRBD_SUPPORTS_AIO_OPEN 1
+#define LIBRBD_SUPPORTS_COMPARE_AND_WRITE 1
 #define LIBRBD_SUPPORTS_LOCKING 1
 #define LIBRBD_SUPPORTS_INVALIDATE 1
 #define LIBRBD_SUPPORTS_IOVEC 1
 #define LIBRBD_SUPPORTS_WATCH 0
+#define LIBRBD_SUPPORTS_WRITESAME 1
 
 #if __GNUC__ >= 4
   #define CEPH_RBD_API    __attribute__ ((visibility ("default")))
@@ -55,7 +57,6 @@ extern "C" {
 #define RBD_FLAG_OBJECT_MAP_INVALID   (1<<0)
 #define RBD_FLAG_FAST_DIFF_INVALID    (1<<1)
 
-typedef void *rbd_snap_t;
 typedef void *rbd_image_t;
 typedef void *rbd_image_options_t;
 
@@ -71,6 +72,13 @@ typedef struct {
   uint64_t size;
   const char *name;
 } rbd_snap_info_t;
+
+typedef struct {
+  const char *pool_name;
+  const char *image_name;
+  const char *image_id;
+  bool trash;
+} rbd_child_info_t;
 
 #define RBD_MAX_IMAGE_NAME_SIZE 96
 #define RBD_MAX_BLOCK_NAME_SIZE 24
@@ -195,6 +203,12 @@ typedef struct {
   time_t deletion_time;
   time_t deferment_end_time;
 } rbd_trash_image_info_t;
+
+typedef struct {
+  char *addr;
+  int64_t id;
+  uint64_t cookie;
+} rbd_image_watcher_t;
 
 CEPH_RBD_API void rbd_image_options_create(rbd_image_options_t* opts);
 CEPH_RBD_API void rbd_image_options_destroy(rbd_image_options_t opts);
@@ -430,6 +444,17 @@ CEPH_RBD_API int rbd_copy_with_progress4(rbd_image_t image,
 					 librbd_progress_fn_t cb, void *cbdata,
 					 size_t sparse_size);
 
+/* deep copy */
+CEPH_RBD_API int rbd_deep_copy(rbd_image_t src, rados_ioctx_t dest_io_ctx,
+                               const char *destname,
+                               rbd_image_options_t dest_opts);
+CEPH_RBD_API int rbd_deep_copy_with_progress(rbd_image_t image,
+                                             rados_ioctx_t dest_io_ctx,
+                                             const char *destname,
+                                             rbd_image_options_t dest_opts,
+                                             librbd_progress_fn_t cb,
+                                             void *cbdata);
+
 /* snapshots */
 CEPH_RBD_API int rbd_snap_list(rbd_image_t image, rbd_snap_info_t *snaps,
                                int *max_snaps);
@@ -528,6 +553,12 @@ CEPH_RBD_API int rbd_flatten_with_progress(rbd_image_t image,
 CEPH_RBD_API ssize_t rbd_list_children(rbd_image_t image, char *pools,
                                        size_t *pools_len, char *images,
                                        size_t *images_len);
+CEPH_RBD_API int rbd_list_children2(rbd_image_t image,
+                                    rbd_child_info_t *children,
+                                    int *max_children);
+CEPH_RBD_API void rbd_list_child_cleanup(rbd_child_info_t *child);
+CEPH_RBD_API void rbd_list_children_cleanup(rbd_child_info_t *children,
+                                            size_t num_children);
 
 /**
  * @defgroup librbd_h_locking Advisory Locking
@@ -701,6 +732,11 @@ CEPH_RBD_API ssize_t rbd_write2(rbd_image_t image, uint64_t ofs, size_t len,
 CEPH_RBD_API int rbd_discard(rbd_image_t image, uint64_t ofs, uint64_t len);
 CEPH_RBD_API ssize_t rbd_writesame(rbd_image_t image, uint64_t ofs, size_t len,
                                    const char *buf, size_t data_len, int op_flags);
+CEPH_RBD_API ssize_t rbd_compare_and_write(rbd_image_t image, uint64_t ofs,
+                                           size_t len, const char *cmp_buf,
+                                           const char *buf, uint64_t *mismatch_off,
+                                           int op_flags);
+
 CEPH_RBD_API int rbd_aio_write(rbd_image_t image, uint64_t off, size_t len,
                                const char *buf, rbd_completion_t c);
 
@@ -726,6 +762,11 @@ CEPH_RBD_API int rbd_aio_discard(rbd_image_t image, uint64_t off, uint64_t len,
 CEPH_RBD_API int rbd_aio_writesame(rbd_image_t image, uint64_t off, size_t len,
                                    const char *buf, size_t data_len,
                                    rbd_completion_t c, int op_flags);
+CEPH_RBD_API ssize_t rbd_aio_compare_and_write(rbd_image_t image,
+                                               uint64_t off, size_t len,
+                                               const char *cmp_buf, const char *buf,
+                                               rbd_completion_t c, uint64_t *mismatch_off,
+                                               int op_flags);
 
 CEPH_RBD_API int rbd_aio_create_completion(void *cb_arg,
                                            rbd_callback_t complete_cb,
@@ -835,6 +876,29 @@ CEPH_RBD_API int rbd_update_watch(rbd_image_t image, uint64_t *handle,
  */
 CEPH_RBD_API int rbd_update_unwatch(rbd_image_t image, uint64_t handle);
 
+/**
+ * List any watchers of an image.
+ *
+ * Watchers will be allocated and stored in the passed watchers array. If there
+ * are more watchers than max_watchers, -ERANGE will be returned and the number
+ * of watchers will be stored in max_watchers.
+ *
+ * The caller should call rbd_watchers_list_cleanup when finished with the list
+ * of watchers.
+ *
+ * @param image the image to list watchers for.
+ * @param watchers an array to store watchers in.
+ * @param max_watchers capacity of the watchers array.
+ * @returns 0 on success, negative error code on failure.
+ * @returns -ERANGE if there are too many watchers for the passed array.
+ * @returns the number of watchers in max_watchers.
+ */
+CEPH_RBD_API int rbd_watchers_list(rbd_image_t image,
+				   rbd_image_watcher_t *watchers,
+				   size_t *max_watchers);
+
+CEPH_RBD_API void rbd_watchers_list_cleanup(rbd_image_watcher_t *watchers,
+					    size_t num_watchers);
 
 CEPH_RBD_API int rbd_group_image_add(
 				rados_ioctx_t group_p, const char *group_name,

@@ -61,9 +61,10 @@ install(FILES
   DESTINATION ${PYTHON_INSTDIR})
 
 if(WITH_MGR)
-  # Needs to match src/common/config_opts.h, which has:
+  # Location needs to match default setting for mgr_module_path, currently:
   # OPTION(mgr_module_path, OPT_STR, CEPH_PKGLIBDIR "/mgr")
   install(DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}/mgr
-    DESTINATION ${CMAKE_INSTALL_PKGLIBDIR})
+    DESTINATION ${CMAKE_INSTALL_PKGLIBDIR}
+    REGEX ".*/\\.gitignore" EXCLUDE)
 endif(WITH_MGR)

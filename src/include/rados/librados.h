@@ -48,6 +48,8 @@ extern "C" {
 #define LIBRADOS_VERSION_CODE LIBRADOS_VERSION(LIBRADOS_VER_MAJOR, LIBRADOS_VER_MINOR, LIBRADOS_VER_EXTRA)
 
 #define LIBRADOS_SUPPORTS_WATCH 1
+#define LIBRADOS_SUPPORTS_SERVICES 1
+#define LIBRADOS_SUPPORTS_APP_METADATA 1
 
 /* RADOS lock flags
  * They are also defined in cls_lock_types.h. Keep them in sync!
@@ -107,7 +109,7 @@ enum {
 
 /**
  * @name Operation Flags
- * Flags for rados_read_op_opeprate(), rados_write_op_operate(),
+ * Flags for rados_read_op_operate(), rados_write_op_operate(),
  * rados_aio_read_op_operate(), and rados_aio_write_op_operate().
  * See librados.hpp for details.
  * @{
@@ -491,7 +493,7 @@ CEPH_RADOS_API void rados_shutdown(rados_t cluster);
  * - log_file, log_to_stderr, err_to_stderr, and log_to_syslog
  * - debug_rados, debug_objecter, debug_monc, debug_auth, or debug_ms
  *
- * All possible options can be found in src/common/config_opts.h in ceph.git
+ * See docs.ceph.com for information about available configuration options`
  *
  * @{
  */
@@ -3507,6 +3509,104 @@ CEPH_RADOS_API int rados_blacklist_add(rados_t cluster,
 				       char *client_address,
 				       uint32_t expire_seconds);
 
+CEPH_RADOS_API void rados_set_osdmap_full_try(rados_ioctx_t io);
+
+CEPH_RADOS_API void rados_unset_osdmap_full_try(rados_ioctx_t io);
+
+/**
+ * Enable an application on a pool
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param force 0 if only single application per pool
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_application_enable(rados_ioctx_t io,
+                                            const char *app_name, int force);
+
+/**
+ * List all enabled applications
+ *
+ * If the provided buffer is too short, the required length is filled in and
+ * -ERANGE is returned. Otherwise, the buffers are filled with the application
+ * names, with a '\0' after each.
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param values buffer in which to store application names
+ * @param vals_len number of bytes in values buffer
+ * @returns 0 on success, negative error code on failure
+ * @returns -ERANGE if either buffer is too short
+ */
+CEPH_RADOS_API int rados_application_list(rados_ioctx_t io, char *values,
+                                          size_t *values_len);
+
+/**
+ * Get application metadata value from pool
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param key metadata key
+ * @param value result buffer
+ * @param value_len maximum len of value
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_application_metadata_get(rados_ioctx_t io,
+                                                  const char *app_name,
+                                                  const char *key, char *value,
+                                                  size_t *value_len);
+
+/**
+ * Set application metadata on a pool
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param key metadata key
+ * @param value metadata key
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_application_metadata_set(rados_ioctx_t io,
+                                                  const char *app_name,
+                                                  const char *key,
+                                                  const char *value);
+
+/**
+ * Remove application metadata from a pool
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param key metadata key
+ * @returns 0 on success, negative error code on failure
+ */
+CEPH_RADOS_API int rados_application_metadata_remove(rados_ioctx_t io,
+                                                     const char *app_name,
+                                                     const char *key);
+
+/**
+ * List all metadata key/value pairs associated with an application.
+ *
+ * This iterates over all metadata, key_len and val_len are filled in
+ * with the number of bytes put into the keys and values buffers.
+ *
+ * If the provided buffers are too short, the required lengths are filled
+ * in and -ERANGE is returned. Otherwise, the buffers are filled with
+ * the keys and values of the metadata, with a '\0' after each.
+ *
+ * @param ioctx pool ioctx
+ * @param app_name application name
+ * @param keys buffer in which to store key names
+ * @param keys_len number of bytes in keys buffer
+ * @param values buffer in which to store values
+ * @param vals_len number of bytes in values buffer
+ * @returns 0 on succcess, negative error code on failure
+ * @returns -ERANGE if either buffer is too short
+ */
+CEPH_RADOS_API int rados_application_metadata_list(rados_ioctx_t io,
+                                                   const char *app_name,
+                                                   char *keys, size_t *key_len,
+                                                   char *values,
+                                                   size_t *vals_len);
+
 /**
  * @name Mon/OSD/PG Commands
  *
@@ -3705,7 +3805,7 @@ CEPH_RADOS_API int rados_monitor_log2(rados_t cluster, const char *level,
  *
  * @param cluster handle
  * @param service service name
- * @param daemon deamon instance name
+ * @param daemon daemon instance name
  * @param metadata_dict static daemon metadata dict
  */
 CEPH_RADOS_API int rados_service_register(

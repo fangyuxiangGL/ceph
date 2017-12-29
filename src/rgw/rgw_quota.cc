@@ -85,6 +85,7 @@ public:
   void set_stats(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs, RGWStorageStats& stats);
   int async_refresh(const rgw_user& user, const rgw_bucket& bucket, RGWQuotaCacheStats& qs);
   void async_refresh_response(const rgw_user& user, rgw_bucket& bucket, RGWStorageStats& stats);
+  void async_refresh_fail(const rgw_user& user, rgw_bucket& bucket);
 
   class AsyncRefreshHandler {
   protected:
@@ -109,10 +110,9 @@ bool RGWQuotaCache<T>::can_use_cached_stats(RGWQuotaInfo& quota, RGWStorageStats
       quota.max_size_soft_threshold = quota.max_size * store->ctx()->_conf->rgw_bucket_quota_soft_threshold;
     }
 
-    const auto cached_stats_num_kb_rounded = rgw_rounded_kb(cached_stats.size_rounded);
-    if (cached_stats_num_kb_rounded >= (uint64_t)quota.max_size_soft_threshold) {
+    if (cached_stats.size_rounded  >= (uint64_t)quota.max_size_soft_threshold) {
       ldout(store->ctx(), 20) << "quota: can't use cached stats, exceeded soft threshold (size): "
-        << cached_stats_num_kb_rounded << " >= " << quota.max_size_soft_threshold << dendl;
+        << cached_stats.size_rounded << " >= " << quota.max_size_soft_threshold << dendl;
       return false;
     }
   }
@@ -155,6 +155,14 @@ int RGWQuotaCache<T>::async_refresh(const rgw_user& user, const rgw_bucket& buck
   }
 
   return 0;
+}
+
+template<class T>
+void RGWQuotaCache<T>::async_refresh_fail(const rgw_user& user, rgw_bucket& bucket)
+{
+  ldout(store->ctx(), 20) << "async stats refresh response for bucket=" << bucket << dendl;
+
+  async_refcount->put();
 }
 
 template<class T>
@@ -232,9 +240,23 @@ public:
     const uint64_t rounded_added = rgw_rounded_objsize(added_bytes);
     const uint64_t rounded_removed = rgw_rounded_objsize(removed_bytes);
 
-    entry->stats.size += added_bytes - removed_bytes;
-    entry->stats.size_rounded += rounded_added - rounded_removed;
-    entry->stats.num_objects += objs_delta;
+    if (((int64_t)(entry->stats.size + added_bytes - removed_bytes)) >= 0) {
+      entry->stats.size += added_bytes - removed_bytes;
+    } else {
+      entry->stats.size = 0;
+    }
+
+    if (((int64_t)(entry->stats.size_rounded + rounded_added - rounded_removed)) >= 0) {
+      entry->stats.size_rounded += rounded_added - rounded_removed;
+    } else {
+      entry->stats.size_rounded = 0;
+    }
+
+    if (((int64_t)(entry->stats.num_objects + objs_delta)) >= 0) {
+      entry->stats.num_objects += objs_delta;
+    } else {
+      entry->stats.num_objects = 0;
+    }
 
     return true;
   }
@@ -294,7 +316,8 @@ void BucketAsyncRefreshHandler::handle_response(const int r)
 {
   if (r < 0) {
     ldout(store->ctx(), 20) << "AsyncRefreshHandler::handle_response() r=" << r << dendl;
-    return; /* nothing to do here */
+    cache->async_refresh_fail(user, bucket);
+    return;
   }
 
   RGWStorageStats bs;
@@ -405,7 +428,8 @@ void UserAsyncRefreshHandler::handle_response(int r)
 {
   if (r < 0) {
     ldout(store->ctx(), 20) << "AsyncRefreshHandler::handle_response() r=" << r << dendl;
-    return; /* nothing to do here */
+    cache->async_refresh_fail(user, bucket);
+    return;
   }
 
   cache->async_refresh_response(user, bucket, stats);
@@ -486,6 +510,9 @@ class RGWUserStatsCache : public RGWQuotaCache<rgw_user> {
         if (ret < 0) {
           ldout(cct, 5) << "ERROR: sync_all_users() returned ret=" << ret << dendl;
         }
+
+        if (stats->going_down())
+          break;
 
         lock.Lock();
         cond.WaitInterval(lock, utime_t(cct->_conf->rgw_user_quota_sync_interval, 0));

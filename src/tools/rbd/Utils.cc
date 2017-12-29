@@ -84,7 +84,7 @@ int read_string(int fd, unsigned max, std::string *out) {
 int extract_spec(const std::string &spec, std::string *pool_name,
                  std::string *image_name, std::string *snap_name,
                  SpecValidation spec_validation) {
-  if (!g_ceph_context->_conf->rbd_validate_names) {
+  if (!g_ceph_context->_conf->get_val<bool>("rbd_validate_names")) {
     spec_validation = SPEC_VALIDATION_NONE;
   }
 
@@ -104,7 +104,7 @@ int extract_spec(const std::string &spec, std::string *pool_name,
     pattern = "^(?:([^/]+)/)?([^@]+)(?:@(.+))?$";
     break;
   default:
-    assert(false);
+    ceph_abort();
     break;
   }
 
@@ -184,7 +184,7 @@ std::string get_positional_argument(const po::variables_map &vm, size_t index) {
 }
 
 std::string get_default_pool_name() {
-  return g_ceph_context->_conf->rbd_default_pool;
+  return g_ceph_context->_conf->get_val<std::string>("rbd_default_pool");
 }
 
 std::string get_pool_name(const po::variables_map &vm, size_t *arg_index) {
@@ -442,7 +442,7 @@ int get_pool_image_snapshot_names(const po::variables_map &vm,
   //Validate pool name while creating/renaming/copying/cloning/importing/etc
   if (spec_validation == SPEC_VALIDATION_FULL) {
     boost::regex pattern("^[^@/]+?$");
-    if (!boost::regex_match (*pool_name, pattern)) {
+    if ((pool_name != nullptr) && !boost::regex_match (*pool_name, pattern)) {
       std::cerr << "rbd: invalid pool name '" << *pool_name << "'" << std::endl;
       return -EINVAL;
     }
@@ -633,12 +633,11 @@ int validate_snapshot_name(at::ArgumentModifier mod,
 int get_image_options(const boost::program_options::variables_map &vm,
 		      bool get_format, librbd::ImageOptions *opts) {
   uint64_t order = 0, stripe_unit = 0, stripe_count = 0, object_size = 0;
-  uint64_t features = 0, features_clear = 0, features_set = 0;
+  uint64_t features = 0, features_clear = 0;
   std::string data_pool;
   bool order_specified = true;
   bool features_specified = false;
   bool features_clear_specified = false;
-  bool features_set_specified = false;
   bool stripe_specified = false;
 
   if (vm.count(at::IMAGE_ORDER)) {
@@ -647,7 +646,7 @@ int get_image_options(const boost::program_options::variables_map &vm,
 	      << std::endl;
   } else if (vm.count(at::IMAGE_OBJECT_SIZE)) {
     object_size = vm[at::IMAGE_OBJECT_SIZE].as<uint64_t>();
-    order = std::round(std::log2(object_size)); 
+    order = std::round(std::log2(object_size));
   } else {
     order_specified = false;
   }
@@ -744,8 +743,6 @@ int get_image_options(const boost::program_options::variables_map &vm,
   if (features_clear_specified) {
     opts->set(RBD_IMAGE_OPTION_FEATURES_CLEAR, features_clear);
   }
-  if (features_set_specified)
-    opts->set(RBD_IMAGE_OPTION_FEATURES_SET, features_set);
   if (stripe_specified) {
     opts->set(RBD_IMAGE_OPTION_STRIPE_UNIT, stripe_unit);
     opts->set(RBD_IMAGE_OPTION_STRIPE_COUNT, stripe_count);
@@ -831,7 +828,13 @@ int get_formatter(const po::variables_map &vm,
       std::cerr << "rbd: --pretty-format only works when --format "
                 << "is json or xml" << std::endl;
       return -EINVAL;
+    } else if (*formatter != nullptr && !pretty) {
+      formatter->get()->enable_line_break();
     }
+  } else if (vm[at::PRETTY_FORMAT].as<bool>()) {
+    std::cerr << "rbd: --pretty-format only works when --format "
+              << "is json or xml" << std::endl;
+    return -EINVAL;
   }
   return 0;
 }

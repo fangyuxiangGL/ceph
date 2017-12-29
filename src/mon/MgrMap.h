@@ -77,6 +77,10 @@ public:
   std::set<std::string> modules;
   std::set<std::string> available_modules;
 
+  // Map of module name to URI, indicating services exposed by
+  // running modules on the active mgr daemon.
+  std::map<std::string, std::string> services;
+
   epoch_t get_epoch() const { return epoch; }
   entity_addr_t get_active_addr() const { return active_addr; }
   uint64_t get_active_gid() const { return active_gid; }
@@ -95,9 +99,32 @@ public:
     return true;
   }
 
+  bool have_name(const string& name) const {
+    if (active_name == name) {
+      return true;
+    }
+    for (auto& p : standbys) {
+      if (p.second.name == name) {
+	return true;
+      }
+    }
+    return false;
+  }
+
+  std::set<std::string> get_all_names() const {
+    std::set<std::string> ls;
+    if (active_name.size()) {
+      ls.insert(active_name);
+    }
+    for (auto& p : standbys) {
+      ls.insert(p.second.name);
+    }
+    return ls;
+  }
+
   void encode(bufferlist& bl, uint64_t features) const
   {
-    ENCODE_START(2, 1, bl);
+    ENCODE_START(3, 1, bl);
     ::encode(epoch, bl);
     ::encode(active_addr, bl, features);
     ::encode(active_gid, bl);
@@ -106,6 +133,7 @@ public:
     ::encode(standbys, bl);
     ::encode(modules, bl);
     ::encode(available_modules, bl);
+    ::encode(services, bl);
     ENCODE_FINISH(bl);
   }
 
@@ -121,6 +149,9 @@ public:
     if (struct_v >= 2) {
       ::decode(modules, p);
       ::decode(available_modules, p);
+    }
+    if (struct_v >= 3) {
+      ::decode(services, p);
     }
     DECODE_FINISH(p);
   }
@@ -152,6 +183,12 @@ public:
     f->open_array_section("available_modules");
     for (auto& j : available_modules) {
       f->dump_string("module", j);
+    }
+    f->close_section();
+
+    f->open_object_section("services");
+    for (const auto &i : services) {
+      f->dump_string(i.first.c_str(), i.second);
     }
     f->close_section();
   }

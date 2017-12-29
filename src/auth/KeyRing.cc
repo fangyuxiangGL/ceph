@@ -28,8 +28,6 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "auth: "
 
-using namespace std;
-
 int KeyRing::from_ceph_context(CephContext *cct)
 {
   const md_config_t *conf = cct->_conf;
@@ -232,7 +230,7 @@ int KeyRing::load(CephContext *cct, const std::string &filename)
     decode(iter);
   }
   catch (const buffer::error& err) {
-    lderr(cct) << "error parsing file " << filename << dendl;
+    lderr(cct) << "error parsing file " << filename << ": " << err.what() << dendl;
     return -EIO;
   }
 

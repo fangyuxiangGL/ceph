@@ -106,7 +106,7 @@ TEST_P(CompressorTest, big_round_trip_repeated)
 
 TEST_P(CompressorTest, big_round_trip_randomish)
 {
-  unsigned len = 1048576 * 100;//269;
+  unsigned len = 1048576 * 10;//269;
   bufferlist orig;
   const char *alphabet = "abcdefghijklmnopqrstuvwxyz";
   if (false) {
@@ -243,7 +243,7 @@ void test_compress(CompressorRef compressor, size_t size)
   }
   bufferlist in;
   in.append(data, size);
-  for (size_t t = 0; t < 100000; t++) {
+  for (size_t t = 0; t < 10000; t++) {
     bufferlist out;
     int res = compressor->compress(in, out);
     EXPECT_EQ(res, 0);
@@ -260,7 +260,7 @@ void test_decompress(CompressorRef compressor, size_t size)
   in.append(data, size);
   int res = compressor->compress(in, out);
   EXPECT_EQ(res, 0);
-  for (size_t t = 0; t < 100000; t++) {
+  for (size_t t = 0; t < 10000; t++) {
     bufferlist out_dec;
     int res = compressor->decompress(out, out_dec);
     EXPECT_EQ(res, 0);
@@ -386,7 +386,7 @@ TEST(CompressionPlugin, all)
   CompressionPlugin *factory = dynamic_cast<CompressionPlugin*>(reg->get_with_load("compressor", "invalid"));
   EXPECT_FALSE(factory);
   factory = dynamic_cast<CompressionPlugin*>(reg->get_with_load("compressor", "example"));
-  EXPECT_TRUE(factory);
+  ASSERT_TRUE(factory);
   stringstream ss;
   EXPECT_EQ(0, factory->factory(&compressor, &ss));
   EXPECT_TRUE(compressor.get());
@@ -413,7 +413,7 @@ TEST(ZlibCompressor, isal_compress_zlib_decompress_random)
   g_ceph_context->_conf->apply_changes(NULL);
   CompressorRef zlib = Compressor::create(g_ceph_context, "zlib");
 
-  for (int cnt=0; cnt<1000; cnt++)
+  for (int cnt=0; cnt<100; cnt++)
   {
     srand(cnt + 1000);
     int log2 = (rand()%18) + 1;
@@ -449,7 +449,7 @@ TEST(ZlibCompressor, isal_compress_zlib_decompress_walk)
   g_ceph_context->_conf->apply_changes(NULL);
   CompressorRef zlib = Compressor::create(g_ceph_context, "zlib");
 
-  for (int cnt=0; cnt<1000; cnt++)
+  for (int cnt=0; cnt<100; cnt++)
   {
     srand(cnt + 1000);
     int log2 = (rand()%18) + 1;

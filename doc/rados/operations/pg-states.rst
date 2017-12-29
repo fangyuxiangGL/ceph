@@ -20,7 +20,10 @@ map is ``active + clean``.
   A replica with necessary data is down, so the placement group is offline.
 
 *Scrubbing*
-  Ceph is checking the placement group for inconsistencies.
+  Ceph is checking the placement group metadata for inconsistencies.
+
+*Deep*
+  Ceph is checking the placement group data against stored checksums.
 
 *Degraded*
   Ceph has not replicated some objects in the placement group the correct number of times yet.
@@ -38,10 +41,16 @@ map is ``active + clean``.
 *Recovering*
   Ceph is migrating/synchronizing objects and their replicas.
 
+*Forced-Recovery*
+  High recovery priority of that PG is enforced by user.
+
 *Backfill*
   Ceph is scanning and synchronizing the entire contents of a placement group
   instead of inferring what contents need to be synchronized from the logs of
   recent operations. *Backfill* is a special case of recovery.
+
+*Forced-Backfill*
+  High backfill priority of that PG is enforced by user.
 
 *Wait-backfill*
   The placement group is waiting in line to start backfill.

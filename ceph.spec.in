@@ -13,7 +13,7 @@
 # This file is under the GNU Lesser General Public License, version 2.1
 #
 # Please submit bugfixes or comments via http://tracker.ceph.com/
-# 
+#
 %bcond_without ocf
 %bcond_without cephfs_java
 %if 0%{?suse_version}
@@ -22,7 +22,6 @@
 %bcond_without ceph_test_package
 %endif
 %bcond_with make_check
-%bcond_with xio
 %ifarch s390 s390x
 %bcond_with tcmalloc
 %else
@@ -45,7 +44,7 @@
 
 %if %{with selinux}
 # get selinux policy version
-%{!?_selinux_policy_version: %global _selinux_policy_version %(sed -e 's,.*selinux-policy-\\([^/]*\\)/.*,\\1,' /usr/share/selinux/devel/policyhelp 2>/dev/null || echo 0.0.0)}
+%{!?_selinux_policy_version: %global _selinux_policy_version 0.0.0}
 %endif
 
 %{!?_udevrulesdir: %global _udevrulesdir /lib/udev/rules.d}
@@ -68,7 +67,8 @@ Release:	@RPM_RELEASE@%{?dist}
 Epoch:		2
 %endif
 
-# define %_epoch_prefix macro which will expand to the empty string if %epoch is undefined
+# define _epoch_prefix macro which will expand to the empty string if epoch is
+# undefined
 %global _epoch_prefix %{?epoch:%{epoch}:}
 
 Summary:	User space components of the Ceph file system
@@ -77,7 +77,7 @@ License:	LGPL-2.1 and CC-BY-SA-1.0 and GPL-2.0 and BSL-1.0 and BSD-3-Clause and 
 Group:		System/Filesystems
 %endif
 URL:		http://ceph.com/
-Source0:	http://ceph.com/download/@TARBALL_BASENAME@.tar.bz2
+Source0:	https://download.ceph.com/tarballs/@TARBALL_BASENAME@.tar.bz2
 %if 0%{?suse_version}
 %if 0%{?is_opensuse}
 ExclusiveArch:  x86_64 aarch64 ppc64 ppc64le
@@ -100,7 +100,6 @@ BuildRequires:	sharutils
 %if 0%{with selinux}
 BuildRequires:	checkpolicy
 BuildRequires:	selinux-policy-devel
-BuildRequires:	/usr/share/selinux/devel/policyhelp
 %endif
 %if 0%{with make_check}
 %if 0%{?fedora} || 0%{?rhel}
@@ -110,6 +109,7 @@ BuildRequires:	python-werkzeug
 %if 0%{?suse_version}
 BuildRequires:	python-CherryPy
 BuildRequires:	python-Werkzeug
+BuildRequires:	python-numpy-devel
 %endif
 BuildRequires:	python-pecan
 BuildRequires:	socat
@@ -119,7 +119,22 @@ BuildRequires:	gperf
 BuildRequires:  cmake
 BuildRequires:	cryptsetup
 BuildRequires:	fuse-devel
+%if 0%{?rhel} == 7
+# devtoolset offers newer make and valgrind-devel, but the old ones are good
+# enough.
+%ifarch x86_64
+BuildRequires:	devtoolset-7-gcc-c++
+%endif
+%ifarch aarch64
+%if 0%{?centos}
+BuildRequires:	devtoolset-6-gcc-c++
+%else
+BuildRequires:	devtoolset-7-gcc-c++
+%endif
+%endif
+%else
 BuildRequires:	gcc-c++
+%endif
 BuildRequires:	gdbm
 %if 0%{with tcmalloc}
 BuildRequires:	gperftools-devel >= 2.4
@@ -132,6 +147,7 @@ BuildRequires:	libcurl-devel
 BuildRequires:	libudev-devel
 BuildRequires:	libtool
 BuildRequires:	libxml2-devel
+BuildRequires:	libuuid-devel
 BuildRequires:	make
 BuildRequires:	parted
 BuildRequires:	perl
@@ -168,12 +184,13 @@ BuildRequires:	keyutils-devel
 BuildRequires:  libopenssl-devel
 BuildRequires:  lsb-release
 BuildRequires:  openldap2-devel
+BuildRequires:  cunit-devel
 BuildRequires:	python-Cython
 BuildRequires:	python-PrettyTable
 BuildRequires:	python-Sphinx
 BuildRequires:  rdma-core-devel
 %endif
-%if 0%{?fedora} || 0%{?rhel} 
+%if 0%{?fedora} || 0%{?rhel}
 Requires:	systemd
 BuildRequires:  boost-random
 BuildRequires:	btrfs-progs
@@ -182,6 +199,7 @@ BuildRequires:	keyutils-libs-devel
 BuildRequires:	libibverbs-devel
 BuildRequires:  openldap-devel
 BuildRequires:  openssl-devel
+BuildRequires:  CUnit-devel
 BuildRequires:  redhat-lsb-core
 BuildRequires:	Cython
 BuildRequires:	python-prettytable
@@ -217,10 +235,6 @@ BuildRequires:	expat-devel
 #hardened-cc1
 %if 0%{?fedora} || 0%{?rhel}
 BuildRequires:  redhat-rpm-config
-%endif
-# Accelio IB/RDMA
-%if 0%{with xio}
-BuildRequires:  libxio-devel
 %endif
 
 %description
@@ -258,9 +272,6 @@ Requires:      which
 %if 0%{?suse_version}
 Recommends:    ntp-daemon
 %endif
-%if 0%{with xio}
-Requires:      libxio
-%endif
 %description base
 Base is the package that includes all the files shared amongst ceph servers
 
@@ -286,9 +297,6 @@ Requires:	python-requests
 %{?systemd_requires}
 %if 0%{?suse_version}
 Requires(pre):	pwdutils
-%endif
-%if 0%{with xio}
-Requires:       libxio
 %endif
 %description -n ceph-common
 Common utilities to mount and interact with a ceph storage cluster.
@@ -339,6 +347,7 @@ Requires:       pyOpenSSL
 Requires: 	python-CherryPy
 Requires:       python-Werkzeug
 Requires:       python-pyOpenSSL
+Recommends:     python-influxdb
 %endif
 Requires:       python-pecan
 %description mgr
@@ -352,6 +361,7 @@ Summary:	Ceph fuse-based client
 %if 0%{?suse_version}
 Group:		System/Filesystems
 %endif
+Requires:       fuse
 %description fuse
 FUSE based client for Ceph distributed network file system
 
@@ -689,6 +699,7 @@ Group:		System/Benchmark
 Requires:	ceph-common
 Requires:	xmlstarlet
 Requires:	jq
+Requires:	socat
 %description -n ceph-test
 This package contains Ceph benchmarks and test tools.
 %endif
@@ -785,6 +796,20 @@ python-rbd, python-rgw or python-cephfs instead.
 %autosetup -p1 -n @TARBALL_BASENAME@
 
 %build
+
+%if 0%{?rhel} == 7
+%ifarch x86_64
+. /opt/rh/devtoolset-7/enable
+%endif
+%ifarch aarch64
+%if 0%{?centos}
+. /opt/rh/devtoolset-6/enable
+%else
+. /opt/rh/devtoolset-7/enable
+%endif
+%endif
+%endif
+
 %if 0%{with cephfs_java}
 # Find jni.h
 for i in /usr/{lib64,lib}/jvm/java/include{,/linux}; do
@@ -824,15 +849,13 @@ cmake .. \
     -DCMAKE_INSTALL_SYSCONFDIR=%{_sysconfdir} \
     -DCMAKE_INSTALL_MANDIR=%{_mandir} \
     -DCMAKE_INSTALL_DOCDIR=%{_docdir}/ceph \
+    -DCMAKE_INSTALL_INCLUDEDIR=%{_includedir} \
     -DWITH_EMBEDDED=OFF \
     -DWITH_MANPAGE=ON \
     -DWITH_PYTHON3=ON \
     -DWITH_SYSTEMD=ON \
 %if 0%{?rhel} && ! 0%{?centos}
     -DWITH_SUBMAN=ON \
-%endif
-%if 0%{with xio}
-    -DWITH_XIO=ON \
 %endif
 %if 0%{without ceph_test_package}
     -DWITH_TESTS=OFF \
@@ -894,6 +917,7 @@ mkdir -p %{buildroot}%{_sbindir}
 install -m 0644 -D src/logrotate.conf %{buildroot}%{_sysconfdir}/logrotate.d/ceph
 chmod 0644 %{buildroot}%{_docdir}/ceph/sample.ceph.conf
 install -m 0644 -D COPYING %{buildroot}%{_docdir}/ceph/COPYING
+install -m 0644 -D etc/sysctl/90-ceph-osd.conf %{buildroot}%{_sysctldir}/90-ceph-osd.conf
 
 # firewall templates and /sbin/mount.ceph symlink
 %if 0%{?suse_version}
@@ -922,6 +946,7 @@ mkdir -p %{buildroot}%{_localstatedir}/lib/ceph/bootstrap-osd
 mkdir -p %{buildroot}%{_localstatedir}/lib/ceph/bootstrap-mds
 mkdir -p %{buildroot}%{_localstatedir}/lib/ceph/bootstrap-rgw
 mkdir -p %{buildroot}%{_localstatedir}/lib/ceph/bootstrap-mgr
+mkdir -p %{buildroot}%{_localstatedir}/lib/ceph/bootstrap-rbd
 
 %if 0%{?suse_version}
 # create __pycache__ directories and their contents
@@ -940,11 +965,14 @@ rm -rf %{buildroot}
 %{_bindir}/crushtool
 %{_bindir}/monmaptool
 %{_bindir}/osdmaptool
+%{_bindir}/ceph-kvstore-tool
 %{_bindir}/ceph-run
 %{_bindir}/ceph-detect-init
 %{_libexecdir}/systemd/system-preset/50-ceph.preset
 %{_sbindir}/ceph-create-keys
 %{_sbindir}/ceph-disk
+%{_sbindir}/ceph-volume
+%{_sbindir}/ceph-volume-systemd
 %{_sbindir}/rcceph
 %dir %{_libexecdir}/ceph
 %{_libexecdir}/ceph/ceph_common.sh
@@ -973,34 +1001,42 @@ rm -rf %{buildroot}
 %config %{_sysconfdir}/sysconfig/SuSEfirewall2.d/services/ceph-osd-mds
 %endif
 %{_unitdir}/ceph-disk@.service
+%{_unitdir}/ceph-volume@.service
 %{_unitdir}/ceph.target
 %{python_sitelib}/ceph_detect_init*
 %{python_sitelib}/ceph_disk*
+%dir %{python_sitelib}/ceph_volume
+%{python_sitelib}/ceph_volume/*
+%{python_sitelib}/ceph_volume-*
 %{_mandir}/man8/ceph-deploy.8*
 %{_mandir}/man8/ceph-detect-init.8*
 %{_mandir}/man8/ceph-create-keys.8*
 %{_mandir}/man8/ceph-disk.8*
+%{_mandir}/man8/ceph-volume.8*
+%{_mandir}/man8/ceph-volume-systemd.8*
 %{_mandir}/man8/ceph-run.8*
 %{_mandir}/man8/crushtool.8*
 %{_mandir}/man8/osdmaptool.8*
 %{_mandir}/man8/monmaptool.8*
+%{_mandir}/man8/ceph-kvstore-tool.8*
 #set up placeholder directories
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/tmp
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/bootstrap-osd
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/bootstrap-mds
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/bootstrap-rgw
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/bootstrap-mgr
+%attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/bootstrap-rbd
 
 %post base
 /sbin/ldconfig
 %if 0%{?suse_version}
 %fillup_only
 if [ $1 -eq 1 ] ; then
-  /usr/bin/systemctl preset ceph-disk@\*.service ceph.target >/dev/null 2>&1 || :
+/usr/bin/systemctl preset ceph-disk@\*.service ceph-volume@\*.service ceph.target >/dev/null 2>&1 || :
 fi
 %endif
 %if 0%{?fedora} || 0%{?rhel}
-%systemd_post ceph-disk@\*.service ceph.target
+%systemd_post ceph-disk@\*.service ceph-volume@\*.service ceph.target
 %endif
 if [ $1 -eq 1 ] ; then
 /usr/bin/systemctl start ceph.target >/dev/null 2>&1 || :
@@ -1008,10 +1044,10 @@ fi
 
 %preun base
 %if 0%{?suse_version}
-%service_del_preun ceph-disk@\*.service ceph.target
+%service_del_preun ceph-disk@\*.service ceph-volume@\*.service ceph.target
 %endif
 %if 0%{?fedora} || 0%{?rhel}
-%systemd_preun ceph-disk@\*.service ceph.target
+%systemd_preun ceph-disk@\*.service ceph-volume@\*.service ceph.target
 %endif
 
 %postun base
@@ -1019,10 +1055,10 @@ fi
 test -n "$FIRST_ARG" || FIRST_ARG=$1
 %if 0%{?suse_version}
 DISABLE_RESTART_ON_UPDATE="yes"
-%service_del_postun ceph-disk@\*.service ceph.target
+%service_del_postun ceph-disk@\*.service ceph-volume@\*.service ceph.target
 %endif
 %if 0%{?fedora} || 0%{?rhel}
-%systemd_postun ceph-disk@\*.service ceph.target
+%systemd_postun ceph-disk@\*.service ceph-volume@\*.service ceph.target
 %endif
 if [ $FIRST_ARG -ge 1 ] ; then
   # Restart on upgrade, but only if "CEPH_AUTO_RESTART_ON_UPGRADE" is set to
@@ -1032,7 +1068,7 @@ if [ $FIRST_ARG -ge 1 ] ; then
     source $SYSCONF_CEPH
   fi
   if [ "X$CEPH_AUTO_RESTART_ON_UPGRADE" = "Xyes" ] ; then
-    /usr/bin/systemctl try-restart ceph-disk@\*.service > /dev/null 2>&1 || :
+    /usr/bin/systemctl try-restart ceph-disk@\*.service ceph-volume@\*.service > /dev/null 2>&1 || :
   fi
 fi
 
@@ -1236,6 +1272,7 @@ fi
 %files mon
 %{_bindir}/ceph-mon
 %{_bindir}/ceph-rest-api
+%{_bindir}/ceph-monstore-tool
 %{_mandir}/man8/ceph-mon.8*
 %{_mandir}/man8/ceph-rest-api.8*
 %{python_sitelib}/ceph_rest_api.py*
@@ -1404,6 +1441,7 @@ fi
 %{_bindir}/ceph-clsinfo
 %{_bindir}/ceph-bluestore-tool
 %{_bindir}/ceph-objectstore-tool
+%{_bindir}/ceph-osdomap-tool
 %{_bindir}/ceph-osd
 %{_libexecdir}/ceph/ceph-osd-prestart.sh
 %dir %{_udevrulesdir}
@@ -1411,12 +1449,14 @@ fi
 %{_udevrulesdir}/95-ceph-osd.rules
 %{_mandir}/man8/ceph-clsinfo.8*
 %{_mandir}/man8/ceph-osd.8*
+%{_mandir}/man8/ceph-bluestore-tool.8*
 %if 0%{?rhel} && ! 0%{?centos}
 %attr(0755,-,-) %{_sysconfdir}/cron.hourly/subman
 %endif
 %{_unitdir}/ceph-osd@.service
 %{_unitdir}/ceph-osd.target
 %attr(750,ceph,ceph) %dir %{_localstatedir}/lib/ceph/osd
+%config(noreplace) %{_sysctldir}/90-ceph-osd.conf
 
 %post osd
 %if 0%{?suse_version}
@@ -1430,6 +1470,11 @@ fi
 if [ $1 -eq 1 ] ; then
 /usr/bin/systemctl start ceph-osd.target >/dev/null 2>&1 || :
 fi
+%if 0%{?sysctl_apply}
+    %sysctl_apply 90-ceph-osd.conf
+%else
+    /usr/lib/systemd/systemd-sysctl %{_sysctldir}/90-ceph-osd.conf > /dev/null 2>&1 || :
+%endif
 
 %preun osd
 %if 0%{?suse_version}
@@ -1466,7 +1511,7 @@ fi
 %dir %{_prefix}/lib/ocf
 %dir %{_prefix}/lib/ocf/resource.d
 %dir %{_prefix}/lib/ocf/resource.d/ceph
-%{_prefix}/lib/ocf/resource.d/ceph/rbd
+%attr(0755,-,-) %{_prefix}/lib/ocf/resource.d/ceph/rbd
 
 %endif
 
@@ -1528,10 +1573,7 @@ fi
 %{_libdir}/librbd_tp.so.*
 %endif
 
-%post -n librbd1
-/sbin/ldconfig
-mkdir -p /usr/lib64/qemu/
-ln -sf %{_libdir}/librbd.so.1 /usr/lib64/qemu/librbd.so.1
+%post -n librbd1 -p /sbin/ldconfig
 
 %postun -n librbd1 -p /sbin/ldconfig
 
@@ -1632,9 +1674,6 @@ ln -sf %{_libdir}/librbd.so.1 /usr/lib64/qemu/librbd.so.1
 %{_bindir}/ceph_tpbench
 %{_bindir}/ceph_xattr_bench
 %{_bindir}/ceph-coverage
-%{_bindir}/ceph-monstore-tool
-%{_bindir}/ceph-osdomap-tool
-%{_bindir}/ceph-kvstore-tool
 %{_bindir}/ceph-debugpack
 %{_mandir}/man8/ceph-debugpack.8*
 %dir %{_libdir}/ceph

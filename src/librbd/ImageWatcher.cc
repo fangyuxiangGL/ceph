@@ -8,6 +8,7 @@
 #include "librbd/internal.h"
 #include "librbd/Operations.h"
 #include "librbd/TaskFinisher.h"
+#include "librbd/Types.h"
 #include "librbd/Utils.h"
 #include "librbd/exclusive_lock/Policy.h"
 #include "librbd/image_watcher/NotifyLockOwner.h"
@@ -425,7 +426,8 @@ void ImageWatcher<I>::handle_request_lock(int r) {
     schedule_request_lock(true);
   } else {
     // lock owner acked -- but resend if we don't see them release the lock
-    int retry_timeout = m_image_ctx.cct->_conf->client_notify_timeout;
+    int retry_timeout = m_image_ctx.cct->_conf->template get_val<int64_t>(
+      "client_notify_timeout");
     ldout(m_image_ctx.cct, 15) << this << " will retry in " << retry_timeout
                                << " seconds" << dendl;
     schedule_request_lock(true, retry_timeout);

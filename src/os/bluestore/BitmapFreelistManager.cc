@@ -58,9 +58,11 @@ BitmapFreelistManager::BitmapFreelistManager(CephContext* cct,
 {
 }
 
-int BitmapFreelistManager::create(uint64_t new_size, KeyValueDB::Transaction txn)
+int BitmapFreelistManager::create(uint64_t new_size, uint64_t min_alloc_size,
+				  KeyValueDB::Transaction txn)
 {
-  bytes_per_block = cct->_conf->bdev_block_size;
+  bytes_per_block = std::max(cct->_conf->bdev_block_size,
+			     (int64_t)min_alloc_size);
   assert(ISP2(bytes_per_block));
   size = P2ALIGN(new_size, bytes_per_block);
   blocks_per_key = cct->_conf->bluestore_freelist_blocks_per_key;
@@ -191,10 +193,10 @@ int get_next_clear_bit(bufferlist& bl, int start)
   const char *p = bl.c_str();
   int bits = bl.length() << 3;
   while (start < bits) {
-    int which_byte = start / 8;
-    int which_bit = start % 8;
-    unsigned char byte_mask = 1 << which_bit;
-    if ((p[which_byte] & byte_mask) == 0) {
+    // byte = start / 8 (or start >> 3)
+    // bit = start % 8 (or start & 7)
+    unsigned char byte_mask = 1 << (start & 7);
+    if ((p[start >> 3] & byte_mask) == 0) {
       return start;
     }
     ++start;
@@ -462,8 +464,6 @@ void BitmapFreelistManager::allocate(
 {
   dout(10) << __func__ << " 0x" << std::hex << offset << "~" << length
 	   << std::dec << dendl;
-  if (cct->_conf->bluestore_debug_freelist)
-    _verify_range(offset, length, 0);
   _xor(offset, length, txn);
 }
 
@@ -473,8 +473,6 @@ void BitmapFreelistManager::release(
 {
   dout(10) << __func__ << " 0x" << std::hex << offset << "~" << length
 	   << std::dec << dendl;
-  if (cct->_conf->bluestore_debug_freelist)
-    _verify_range(offset, length, 1);
   _xor(offset, length, txn);
 }
 

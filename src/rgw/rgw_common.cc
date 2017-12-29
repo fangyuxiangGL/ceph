@@ -25,6 +25,7 @@
 #include "common/Clock.h"
 #include "common/Formatter.h"
 #include "common/perf_counters.h"
+#include "common/convenience.h"
 #include "common/strtol.h"
 #include "include/str_list.h"
 #include "auth/Crypto.h"
@@ -62,6 +63,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_INVALID_DIGEST, {400, "InvalidDigest" }},
     { ERR_BAD_DIGEST, {400, "BadDigest" }},
     { ERR_INVALID_LOCATION_CONSTRAINT, {400, "InvalidLocationConstraint" }},
+    { ERR_ZONEGROUP_DEFAULT_PLACEMENT_MISCONFIGURATION, {400, "ZonegroupDefaultPlacementMisconfiguration" }},
     { ERR_INVALID_BUCKET_NAME, {400, "InvalidBucketName" }},
     { ERR_INVALID_OBJECT_NAME, {400, "InvalidObjectName" }},
     { ERR_UNRESOLVABLE_EMAIL, {400, "UnresolvableGrantByEmailAddress" }},
@@ -75,6 +77,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_AMZ_CONTENT_SHA256_MISMATCH, {400, "XAmzContentSHA256Mismatch" }},
     { ERR_INVALID_TAG, {400, "InvalidTag"}},
     { ERR_MALFORMED_ACL_ERROR, {400, "MalformedACLError" }},
+    { ERR_INVALID_ENCRYPTION_ALGORITHM, {400, "InvalidEncryptionAlgorithmError" }},
     { ERR_LENGTH_REQUIRED, {411, "MissingContentLength" }},
     { EACCES, {403, "AccessDenied" }},
     { EPERM, {403, "AccessDenied" }},
@@ -117,11 +120,14 @@ rgw_http_errors rgw_http_s3_errors({
 rgw_http_errors rgw_http_swift_errors({
     { EACCES, {403, "AccessDenied" }},
     { EPERM, {401, "AccessDenied" }},
+    { ENAMETOOLONG, {400, "Metadata name too long" }},
     { ERR_USER_SUSPENDED, {401, "UserSuspended" }},
     { ERR_INVALID_UTF8, {412, "Invalid UTF8" }},
     { ERR_BAD_URL, {412, "Bad URL" }},
     { ERR_NOT_SLO_MANIFEST, {400, "Not an SLO manifest" }},
     { ERR_QUOTA_EXCEEDED, {413, "QuotaExceeded" }},
+    { ENOTEMPTY, {409, "There was a conflict when trying "
+                       "to complete your request." }},
     /* FIXME(rzarzynski): we need to find a way to apply Swift's error handling
      * procedures also for ERR_ZERO_IN_URL. This make a problem as the validation
      * is performed very early, even before setting the req_state::proto_flags. */
@@ -268,14 +274,12 @@ req_state::req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u)
   : cct(_cct), cio(NULL), op(OP_UNKNOWN), user(u), has_acl_header(false),
     info(_cct, e)
 {
-  enable_ops_log = e->conf.enable_ops_log;
-  enable_usage_log = e->conf.enable_usage_log;
-  defer_to_bucket_acls = e->conf.defer_to_bucket_acls;
+  enable_ops_log = e->get_enable_ops_log();
+  enable_usage_log = e->get_enable_usage_log();
+  defer_to_bucket_acls = e->get_defer_to_bucket_acls();
   content_started = false;
   format = 0;
   formatter = NULL;
-  bucket_acl = NULL;
-  object_acl = NULL;
   expect_cont = false;
 
   obj_size = 0;
@@ -297,8 +301,6 @@ req_state::req_state(CephContext* _cct, RGWEnv* e, RGWUserInfo* u)
 
 req_state::~req_state() {
   delete formatter;
-  delete bucket_acl;
-  delete object_acl;
 }
 
 bool search_err(rgw_http_errors& errs, int err_no, bool is_website_redirect, int& http_ret, string& code)
@@ -344,7 +346,17 @@ void set_req_state_err(struct req_state* s, int err_no, const string& err_msg)
 {
   if (s) {
     set_req_state_err(s, err_no);
-    s->err.message = err_msg;
+    if (s->prot_flags & RGW_REST_SWIFT && !err_msg.empty()) {
+      /* TODO(rzarzynski): there never ever should be a check like this one.
+       * It's here only for the sake of the patch's backportability. Further
+       * commits will move the logic to a per-RGWHandler replacement of
+       * the end_header() function. Alternativaly, we might consider making
+       * that just for the dump(). Please take a look on @cbodley's comments
+       * in PR #10690 (https://github.com/ceph/ceph/pull/10690). */
+      s->err.err_code = err_msg;
+    } else {
+      s->err.message = err_msg;
+    }
   }
 }
 
@@ -663,6 +675,14 @@ void rgw_to_iso8601(const real_time& t, string *dest)
   *dest = buf;
 }
 
+
+string rgw_to_asctime(const utime_t& t)
+{
+  stringstream s;
+  t.asctime(s);
+  return s.str();
+}
+
 /*
  * calculate the sha1 value of a given msg and key
  */
@@ -749,11 +769,7 @@ int gen_rand_base64(CephContext *cct, char *dest, int size) /* size should be th
   char tmp_dest[size + 4]; /* so that there's space for the extra '=' characters, and some */
   int ret;
 
-  ret = get_random_bytes(buf, sizeof(buf));
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(buf, sizeof(buf));
 
   ret = ceph_armor(tmp_dest, &tmp_dest[sizeof(tmp_dest)],
 		   (const char *)buf, ((const char *)buf) + ((size - 1) * 3 + 4 - 1) / 4);
@@ -770,13 +786,9 @@ int gen_rand_base64(CephContext *cct, char *dest, int size) /* size should be th
 
 static const char alphanum_upper_table[]="0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-int gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+void gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
 {
-  int ret = get_random_bytes(dest, size);
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(dest, size);
 
   int i;
   for (i=0; i<size - 1; i++) {
@@ -784,19 +796,13 @@ int gen_rand_alphanumeric_upper(CephContext *cct, char *dest, int size) /* size 
     dest[i] = alphanum_upper_table[pos % (sizeof(alphanum_upper_table) - 1)];
   }
   dest[i] = '\0';
-
-  return 0;
 }
 
 static const char alphanum_lower_table[]="0123456789abcdefghijklmnopqrstuvwxyz";
 
-int gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+void gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
 {
-  int ret = get_random_bytes(dest, size);
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(dest, size);
 
   int i;
   for (i=0; i<size - 1; i++) {
@@ -804,31 +810,21 @@ int gen_rand_alphanumeric_lower(CephContext *cct, char *dest, int size) /* size 
     dest[i] = alphanum_lower_table[pos % (sizeof(alphanum_lower_table) - 1)];
   }
   dest[i] = '\0';
-
-  return 0;
 }
 
-int gen_rand_alphanumeric_lower(CephContext *cct, string *str, int length)
+void gen_rand_alphanumeric_lower(CephContext *cct, string *str, int length)
 {
   char buf[length + 1];
-  int ret = gen_rand_alphanumeric_lower(cct, buf, sizeof(buf));
-  if (ret < 0) {
-    return ret;
-  }
+  gen_rand_alphanumeric_lower(cct, buf, sizeof(buf));
   *str = buf;
-  return 0;
 }
 
 // this is basically a modified base64 charset, url friendly
 static const char alphanum_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-int gen_rand_alphanumeric(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+void gen_rand_alphanumeric(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
 {
-  int ret = get_random_bytes(dest, size);
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(dest, size);
 
   int i;
   for (i=0; i<size - 1; i++) {
@@ -836,19 +832,13 @@ int gen_rand_alphanumeric(CephContext *cct, char *dest, int size) /* size should
     dest[i] = alphanum_table[pos & 63];
   }
   dest[i] = '\0';
-
-  return 0;
 }
 
 static const char alphanum_no_underscore_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.";
 
-int gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+void gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
 {
-  int ret = get_random_bytes(dest, size);
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(dest, size);
 
   int i;
   for (i=0; i<size - 1; i++) {
@@ -856,19 +846,13 @@ int gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, int size) 
     dest[i] = alphanum_no_underscore_table[pos & 63];
   }
   dest[i] = '\0';
-
-  return 0;
 }
 
 static const char alphanum_plain_table[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-int gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
+void gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size) /* size should be the required string size + 1 */
 {
-  int ret = get_random_bytes(dest, size);
-  if (ret < 0) {
-    lderr(cct) << "cannot get random bytes: " << cpp_strerror(-ret) << dendl;
-    return ret;
-  }
+  cct->random()->get_bytes(dest, size);
 
   int i;
   for (i=0; i<size - 1; i++) {
@@ -876,8 +860,6 @@ int gen_rand_alphanumeric_plain(CephContext *cct, char *dest, int size) /* size 
     dest[i] = alphanum_plain_table[pos % (sizeof(alphanum_plain_table) - 1)];
   }
   dest[i] = '\0';
-
-  return 0;
 }
 
 int NameVal::parse()
@@ -994,6 +976,18 @@ const string& RGWHTTPArgs::get(const string& name, bool *exists) const
   return empty_str;
 }
 
+boost::optional<const std::string&>
+RGWHTTPArgs::get_optional(const std::string& name) const
+{
+  bool exists;
+  const std::string& value = get(name, &exists);
+  if (exists) {
+    return value;
+  } else {
+    return boost::none;
+  }
+}
+
 int RGWHTTPArgs::get_bool(const string& name, bool *val, bool *exists)
 {
   map<string, string>::iterator iter;
@@ -1092,6 +1086,19 @@ bool verify_requester_payer_permission(struct req_state *s)
   return false;
 }
 
+namespace {
+Effect eval_or_pass(const optional<Policy>& policy,
+			   const rgw::IAM::Environment& env,
+			   const rgw::auth::Identity& id,
+			   const uint64_t op,
+			   const ARN& arn) {
+  if (!policy)
+    return Effect::Pass;
+  else
+    return policy->eval(env, id, op, arn);
+}
+}
+
 bool verify_bucket_permission(struct req_state * const s,
 			      const rgw_bucket& bucket,
                               RGWAccessControlPolicy * const user_acl,
@@ -1102,15 +1109,14 @@ bool verify_bucket_permission(struct req_state * const s,
   if (!verify_requester_payer_permission(s))
     return false;
 
-  if (bucket_policy) {
-    auto r = bucket_policy->eval(s->env, *s->auth.identity, op, ARN(bucket));
-    if (r == Effect::Allow)
-      // It looks like S3 ACLs only GRANT permissions rather than
-      // denying them, so this should be safe.
-      return true;
-    else if (r == Effect::Deny)
-      return false;
-  }
+  auto r = eval_or_pass(bucket_policy, s->env, *s->auth.identity,
+			op, ARN(bucket));
+  if (r == Effect::Allow)
+    // It looks like S3 ACLs only GRANT permissions rather than
+    // denying them, so this should be safe.
+    return true;
+  else if (r == Effect::Deny)
+    return false;
 
   const auto perm = op_to_perm(op);
 
@@ -1144,20 +1150,39 @@ bool verify_bucket_permission_no_policy(struct req_state * const s, const int pe
     return false;
 
   return verify_bucket_permission_no_policy(s,
-					    s->user_acl.get(),
-					    s->bucket_acl,
-					    perm);
+                                            s->user_acl.get(),
+                                            s->bucket_acl.get(),
+                                            perm);
 }
 
 bool verify_bucket_permission(struct req_state * const s, const uint64_t op)
 {
   return verify_bucket_permission(s,
-				  s->bucket,
+                                  s->bucket,
                                   s->user_acl.get(),
-                                  s->bucket_acl,
-				  s->iam_policy,
+                                  s->bucket_acl.get(),
+                                  s->iam_policy,
                                   op);
 }
+
+// Authorize anyone permitted by the policy and the bucket owner
+// unless explicitly denied by the policy.
+
+int verify_bucket_owner_or_policy(struct req_state* const s,
+				  const uint64_t op)
+{
+  auto e = eval_or_pass(s->iam_policy,
+			s->env, *s->auth.identity,
+			op, ARN(s->bucket));
+  if (e == Effect::Allow ||
+      (e == Effect::Pass &&
+       s->auth.identity->is_owner_of(s->bucket_owner.get_id()))) {
+    return 0;
+  } else {
+    return -EACCES;
+  }
+}
+
 
 static inline bool check_deferred_bucket_perms(struct req_state * const s,
 					       const rgw_bucket& bucket,
@@ -1192,15 +1217,14 @@ bool verify_object_permission(struct req_state * const s,
   if (!verify_requester_payer_permission(s))
     return false;
 
-  if (bucket_policy) {
-    auto r = bucket_policy->eval(s->env, *s->auth.identity, op, ARN(obj));
-    if (r == Effect::Allow)
-      // It looks like S3 ACLs only GRANT permissions rather than
-      // denying them, so this should be safe.
-      return true;
-    else if (r == Effect::Deny)
-      return false;
-  }
+
+  auto r = eval_or_pass(bucket_policy, s->env, *s->auth.identity, op, ARN(obj));
+  if (r == Effect::Allow)
+    // It looks like S3 ACLs only GRANT permissions rather than
+    // denying them, so this should be safe.
+    return true;
+  else if (r == Effect::Deny)
+    return false;
 
   const auto perm = op_to_perm(op);
 
@@ -1299,19 +1323,21 @@ bool verify_object_permission_no_policy(struct req_state *s, int perm)
   if (!verify_requester_payer_permission(s))
     return false;
 
-  return verify_object_permission_no_policy(s, s->user_acl.get(),
-					    s->bucket_acl, s->object_acl,
-					    perm);
+  return verify_object_permission_no_policy(s,
+                                            s->user_acl.get(),
+                                            s->bucket_acl.get(),
+                                            s->object_acl.get(),
+                                            perm);
 }
 
 bool verify_object_permission(struct req_state *s, uint64_t op)
 {
   return verify_object_permission(s,
-				  rgw_obj(s->bucket, s->object),
-				  s->user_acl.get(),
-                                  s->bucket_acl,
-                                  s->object_acl,
-				  s->iam_policy,
+                                  rgw_obj(s->bucket, s->object),
+                                  s->user_acl.get(),
+                                  s->bucket_acl.get(),
+                                  s->object_acl.get(),
+                                  s->iam_policy,
                                   op);
 }
 
@@ -1799,11 +1825,10 @@ void rgw_raw_obj::decode_from_rgw_obj(bufferlist::iterator& bl)
   pool = old_obj.get_explicit_data_pool();
 }
 
-std::string rgw_bucket::get_key(char tenant_delim, char id_delim) const
+std::string rgw_bucket::get_key(char tenant_delim, char id_delim, size_t reserve) const
 {
-  static constexpr size_t shard_len{12}; // ":4294967295\0"
   const size_t max_len = tenant.size() + sizeof(tenant_delim) +
-      name.size() + sizeof(id_delim) + bucket_id.size() + shard_len;
+      name.size() + sizeof(id_delim) + bucket_id.size() + reserve;
 
   std::string key;
   key.reserve(max_len);
@@ -1822,7 +1847,8 @@ std::string rgw_bucket::get_key(char tenant_delim, char id_delim) const
 std::string rgw_bucket_shard::get_key(char tenant_delim, char id_delim,
                                       char shard_delim) const
 {
-  auto key = bucket.get_key(tenant_delim, id_delim);
+  static constexpr size_t shard_len{12}; // ":4294967295\0"
+  auto key = bucket.get_key(tenant_delim, id_delim, shard_len);
   if (shard_id >= 0 && shard_delim) {
     key.append(1, shard_delim);
     key.append(std::to_string(shard_id));
@@ -1842,79 +1868,83 @@ int rgw_parse_op_type_list(const string& str, uint32_t *perm)
   return parse_list_of_flags(op_type_mapping, str, perm);
 }
 
-static int match_internal(boost::string_ref pattern, boost::string_ref input, int (*function)(const char&, const char&))
+bool match_policy(boost::string_view pattern, boost::string_view input,
+                  uint32_t flag)
 {
-  boost::string_ref::iterator it1 = pattern.begin();
-  boost::string_ref::iterator it2 = input.begin();
-  while(true) {
-    if (it1 == pattern.end() && it2 == input.end())
-        return 1;
-    if (it1 == pattern.end() || it2 == input.end())
-        return 0;
-    if (*it1 == '*' && (it1 + 1) == pattern.end() && it2 != input.end())
-      return 1;
-    if (*it1 == '*' && (it1 + 1) == pattern.end() && it2 == input.end())
-      return 0;
-    if (function(*it1, *it2) || *it1 == '?') {
-      ++it1;
-      ++it2;
-      continue;
-    }
-    if (*it1 == '*') {
-      if (function(*(it1 + 1), *it2))
-        ++it1;
-      else
-        ++it2;
-      continue;
-    }
-    return 0;
-  }
-  return 0;
-}
+  const uint32_t flag2 = flag & (MATCH_POLICY_ACTION|MATCH_POLICY_ARN) ?
+      MATCH_CASE_INSENSITIVE : 0;
 
-static int matchcase(const char& c1, const char& c2)
-{
-  if (c1 == c2)
-      return 1;
-  return 0;
-}
-
-static int matchignorecase(const char& c1, const char& c2)
-{
-  if (tolower(c1) == tolower(c2))
-      return 1;
-  return 0;
-}
-
-int match(const string& pattern, const string& input, uint32_t flag)
-{
-  auto last_pos_input = 0, last_pos_pattern = 0;
-
-  while(true) {
+  const auto npos = boost::string_view::npos;
+  boost::string_view::size_type last_pos_input = 0, last_pos_pattern = 0;
+  while (true) {
     auto cur_pos_input = input.find(":", last_pos_input);
     auto cur_pos_pattern = pattern.find(":", last_pos_pattern);
 
-    string substr_input = input.substr(last_pos_input, cur_pos_input);
-    string substr_pattern = pattern.substr(last_pos_pattern, cur_pos_pattern);
+    auto substr_input = input.substr(last_pos_input, cur_pos_input);
+    auto substr_pattern = pattern.substr(last_pos_pattern, cur_pos_pattern);
 
-    int res;
-    if (substr_pattern == "*") {
-      res = 1;
-    } else if (flag & MATCH_POLICY_ACTION || flag & MATCH_POLICY_ARN) {
-      res = match_internal(substr_pattern, substr_input, &matchignorecase);
-    } else {
-      res = match_internal(substr_pattern, substr_input, &matchcase);
-    }
-    if (res == 0)
-      return 0;
+    if (!match_wildcards(substr_pattern, substr_input, flag2))
+      return false;
 
-    if (cur_pos_pattern == string::npos && cur_pos_input == string::npos)
-      return 1;
-    else if ((cur_pos_pattern == string::npos && cur_pos_input != string::npos) ||
-	     (cur_pos_pattern != string::npos && cur_pos_input == string::npos))
-      return 0;
+    if (cur_pos_pattern == npos)
+      return cur_pos_input == npos;
+    if (cur_pos_input == npos)
+      return false;
 
     last_pos_pattern = cur_pos_pattern + 1;
     last_pos_input = cur_pos_input + 1;
   }
+}
+
+/*
+ * make attrs look-like-this
+ * converts underscores to dashes
+ */
+string lowercase_dash_http_attr(const string& orig)
+{
+  const char *s = orig.c_str();
+  char buf[orig.size() + 1];
+  buf[orig.size()] = '\0';
+
+  for (size_t i = 0; i < orig.size(); ++i, ++s) {
+    switch (*s) {
+      case '_':
+        buf[i] = '-';
+        break;
+      default:
+        buf[i] = tolower(*s);
+    }
+  }
+  return string(buf);
+}
+
+/*
+ * make attrs Look-Like-This
+ * converts underscores to dashes
+ */
+string camelcase_dash_http_attr(const string& orig)
+{
+  const char *s = orig.c_str();
+  char buf[orig.size() + 1];
+  buf[orig.size()] = '\0';
+
+  bool last_sep = true;
+
+  for (size_t i = 0; i < orig.size(); ++i, ++s) {
+    switch (*s) {
+      case '_':
+      case '-':
+        buf[i] = '-';
+        last_sep = true;
+        break;
+      default:
+        if (last_sep) {
+          buf[i] = toupper(*s);
+        } else {
+          buf[i] = tolower(*s);
+        }
+        last_sep = false;
+    }
+  }
+  return string(buf);
 }

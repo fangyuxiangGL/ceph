@@ -97,6 +97,11 @@ struct C_AsyncCallback : public Context {
 
 std::string generate_image_id(librados::IoCtx &ioctx);
 
+template <typename T>
+inline std::string generate_image_id(librados::IoCtx &ioctx) {
+  return generate_image_id(ioctx);
+}
+
 const std::string group_header_name(const std::string &group_id);
 const std::string id_obj_name(const std::string &name);
 const std::string header_name(const std::string &image_id);
@@ -202,6 +207,9 @@ inline ZTracer::Trace create_trace(const I &image_ctx, const char *trace_name,
   }
   return ZTracer::Trace();
 }
+
+bool is_metadata_config_override(const std::string& metadata_key,
+                                 std::string* config_key);
 
 } // namespace util
 

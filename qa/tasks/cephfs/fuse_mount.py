@@ -222,6 +222,15 @@ class FuseMount(CephFSMount):
         except run.CommandFailedError:
             log.info('Failed to unmount ceph-fuse on {name}, aborting...'.format(name=self.client_remote.name))
 
+            self.client_remote.run(args=[
+                'sudo',
+                run.Raw('PATH=/usr/sbin:$PATH'),
+                'lsof',
+                run.Raw(';'),
+                'ps',
+                'auxf',
+            ])
+
             # abort the fuse mount, killing all hung processes
             if self._fuse_conn:
                 self.run_python(dedent("""
@@ -310,6 +319,7 @@ class FuseMount(CephFSMount):
         """
         Terminate the client without removing the mount point.
         """
+        log.info('Killing ceph-fuse connection on {name}...'.format(name=self.client_remote.name))
         self.fuse_daemon.stdin.close()
         try:
             self.fuse_daemon.wait()
@@ -320,6 +330,7 @@ class FuseMount(CephFSMount):
         """
         Follow up ``kill`` to get to a clean unmounted state.
         """
+        log.info('Cleaning up killed ceph-fuse connection')
         self.umount()
         self.cleanup()
 

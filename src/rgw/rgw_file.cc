@@ -92,10 +92,10 @@ namespace rgw {
 	auto ux_key = req.get_attr(RGW_ATTR_UNIX_KEY1);
 	auto ux_attrs = req.get_attr(RGW_ATTR_UNIX1);
 	if (ux_key && ux_attrs) {
-	  bool old_key = rgw_fh->decode_attrs(ux_key, ux_attrs);
-	  if (old_key) {
-	    update_fhk(rgw_fh);
-	  }
+	  DecodeAttrsResult dar = rgw_fh->decode_attrs(ux_key, ux_attrs);
+	  if (get<0>(dar) || get<1>(dar)) {
+	    update_fh(rgw_fh);
+          }
 	}
 	if (! (flags & RGWFileHandle::FLAG_LOCKED)) {
 	  rgw_fh->mtx.unlock();
@@ -147,10 +147,10 @@ namespace rgw {
 	    auto ux_key = req.get_attr(RGW_ATTR_UNIX_KEY1);
 	    auto ux_attrs = req.get_attr(RGW_ATTR_UNIX1);
 	    if (ux_key && ux_attrs) {
-	      bool old_key = rgw_fh->decode_attrs(ux_key, ux_attrs);
-	      if (old_key) {
-		update_fhk(rgw_fh);
-	      }
+              DecodeAttrsResult dar = rgw_fh->decode_attrs(ux_key, ux_attrs);
+              if (get<0>(dar) || get<1>(dar)) {
+                update_fh(rgw_fh);
+              }
 	    }
 	  }
 	  goto done;
@@ -181,10 +181,10 @@ namespace rgw {
 	    auto ux_key = req.get_attr(RGW_ATTR_UNIX_KEY1);
 	    auto ux_attrs = req.get_attr(RGW_ATTR_UNIX1);
 	    if (ux_key && ux_attrs) {
-	      bool old_key = rgw_fh->decode_attrs(ux_key, ux_attrs);
-	      if (old_key) {
-		update_fhk(rgw_fh);
-	      }
+              DecodeAttrsResult dar = rgw_fh->decode_attrs(ux_key, ux_attrs);
+              if (get<0>(dar) || get<1>(dar)) {
+                update_fh(rgw_fh);
+              }
 	    }
 	  }
 	  goto done;
@@ -201,6 +201,8 @@ namespace rgw {
 	  if (req.matched) {
 	    /* we need rgw object's key name equal to file name, if
 	     * not return NULL */
+#if 0 /* original behavior which motivated FLAG_EXACT_MATCH
+       * no longer reproduces */
 	    if ((flags & RGWFileHandle::FLAG_EXACT_MATCH) &&
 		!req.exact_matched) {
 	      lsubdout(get_context(), rgw, 15)
@@ -209,6 +211,7 @@ namespace rgw {
 		<< path << dendl;
 	      goto done;
 	    }
+#endif
 	    fhr = lookup_fh(parent, path,
 			    RGWFileHandle::FLAG_CREATE|
 			    ((req.is_dir) ?
@@ -744,7 +747,7 @@ namespace rgw {
   } /* RGWLibFS::setattr */
 
   /* called under rgw_fh->mtx held */
-  void RGWLibFS::update_fhk(RGWFileHandle *rgw_fh)
+  void RGWLibFS::update_fh(RGWFileHandle *rgw_fh)
   {
     int rc, rc2;
     string obj_name{rgw_fh->relative_object_name()};
@@ -757,15 +760,15 @@ namespace rgw {
 
     lsubdout(get_context(), rgw, 17)
       << __func__
-      << " update old versioned fhk : " << obj_name
+      << " update old versioned fh : " << obj_name
       << dendl;
 
     RGWSetAttrsRequest req(cct, get_user(), rgw_fh->bucket_name(), obj_name);
 
     rgw_fh->encode_attrs(ux_key, ux_attrs);
 
-    /* update ux_key only */
     req.emplace_attr(RGW_ATTR_UNIX_KEY1, std::move(ux_key));
+    req.emplace_attr(RGW_ATTR_UNIX1, std::move(ux_attrs));
 
     rc = rgwlib.get_fe()->execute_req(&req);
     rc2 = req.get_ret();
@@ -773,10 +776,10 @@ namespace rgw {
     if ((rc != 0) || (rc2 != 0)) {
       lsubdout(get_context(), rgw, 17)
 	<< __func__
-	<< " update fhk failed : " << obj_name
+	<< " update fh failed : " << obj_name
 	<< dendl;
     }
-  } /* RGWLibFS::update_fhk */
+  } /* RGWLibFS::update_fh */
 
   void RGWLibFS::close()
   {
@@ -786,7 +789,7 @@ namespace rgw {
     {
       RGWLibFS* fs;
     public:
-      ObjUnref(RGWLibFS* fs) : fs(fs) {}
+      ObjUnref(RGWLibFS* _fs) : fs(_fs) {}
       void operator()(RGWFileHandle* fh) const {
 	lsubdout(fs->get_context(), rgw, 5)
 	  << __func__
@@ -839,8 +842,7 @@ namespace rgw {
       = get_context()->_conf->rgw_nfs_namespace_expire_secs;
 
     /* max events to gc in one cycle */
-    uint32_t max_ev =
-      std::max(1, get_context()->_conf->rgw_nfs_max_gc);
+    uint32_t max_ev = get_context()->_conf->rgw_nfs_max_gc;
 
     struct timespec now, expire_ts;
     event_vector ve;
@@ -957,7 +959,7 @@ namespace rgw {
       fs->fh_cache.remove(fh.fh_hk.object, this, FHCache::FLAG_LOCK);
     }
     /* cond-unref parent */
-    if (parent && (! parent->is_root())) {
+    if (parent && (! parent->is_mount())) {
       /* safe because if parent->unref causes its deletion,
        * there are a) by refcnt, no other objects/paths pointing
        * to it and b) by the semantics of valid iteration of
@@ -977,23 +979,26 @@ namespace rgw {
     rgw::encode(*this, ux_attrs1);
   } /* RGWFileHandle::encode_attrs */
 
-  bool RGWFileHandle::decode_attrs(const ceph::buffer::list* ux_key1,
-				   const ceph::buffer::list* ux_attrs1)
+  DecodeAttrsResult RGWFileHandle::decode_attrs(const ceph::buffer::list* ux_key1,
+                                                const ceph::buffer::list* ux_attrs1)
   {
-    bool old_key = false;
+    DecodeAttrsResult dar { false, false };
     fh_key fhk;
     auto bl_iter_key1  = const_cast<buffer::list*>(ux_key1)->begin();
     rgw::decode(fhk, bl_iter_key1);
     if (fhk.version >= 2) {
       assert(this->fh.fh_hk == fhk.fh_hk);
     } else {
-      old_key = true;
+      get<0>(dar) = true;
     }
 
     auto bl_iter_unix1 = const_cast<buffer::list*>(ux_attrs1)->begin();
     rgw::decode(*this, bl_iter_unix1);
+    if (this->state.version < 2) {
+      get<1>(dar) = true;
+    }
 
-    return old_key;
+    return dar;
   } /* RGWFileHandle::decode_attrs */
 
   bool RGWFileHandle::reclaim() {
@@ -1021,31 +1026,41 @@ namespace rgw {
     return false;
   }
 
-  int RGWFileHandle::readdir(rgw_readdir_cb rcb, void *cb_arg, uint64_t *offset,
+  std::ostream& operator<<(std::ostream &os,
+			   RGWFileHandle::readdir_offset const &offset)
+  {
+    using boost::get;
+    if (unlikely(!! get<uint64_t*>(&offset))) {
+      uint64_t* ioff = get<uint64_t*>(offset);
+      os << *ioff;
+    }
+    else
+      os << get<const char*>(offset);
+    return os;
+  }
+
+  int RGWFileHandle::readdir(rgw_readdir_cb rcb, void *cb_arg,
+			     readdir_offset offset,
 			     bool *eof, uint32_t flags)
   {
     using event = RGWLibFS::event;
+    using boost::get;
     int rc = 0;
     struct timespec now;
     CephContext* cct = fs->get_context();
-
-    if ((*offset == 0) &&
-	(flags & RGW_READDIR_FLAG_DOTDOT)) {
-      /* send '.' and '..' with their NFS-defined offsets */
-      rcb(".", cb_arg, 1, RGW_LOOKUP_FLAG_DIR);
-      rcb("..", cb_arg, 2, RGW_LOOKUP_FLAG_DIR);
-    }
-
-    lsubdout(fs->get_context(), rgw, 15)
-      << __func__
-      << " offset=" << *offset
-      << dendl;
 
     directory* d = get<directory>(&variant_type);
     if (d) {
       (void) clock_gettime(CLOCK_MONOTONIC_COARSE, &now); /* !LOCKED */
       lock_guard guard(mtx);
       d->last_readdir = now;
+    }
+
+    bool initial_off;
+    if (likely(!! get<const char*>(&offset))) {
+      initial_off = ! get<const char*>(offset);
+    } else {
+      initial_off = (*get<uint64_t*>(offset) == 0);
     }
 
     if (is_root()) {
@@ -1056,7 +1071,7 @@ namespace rgw {
 	(void) clock_gettime(CLOCK_MONOTONIC_COARSE, &now); /* !LOCKED */
 	lock_guard guard(mtx);
 	state.atime = now;
-	if (*offset == 0)
+	if (initial_off)
 	  set_nlink(2);
 	inc_nlink(req.d_count);
 	*eof = req.eof();
@@ -1071,7 +1086,7 @@ namespace rgw {
 	(void) clock_gettime(CLOCK_MONOTONIC_COARSE, &now); /* !LOCKED */
 	lock_guard guard(mtx);
 	state.atime = now;
-	if (*offset == 0)
+	if (initial_off)
 	  set_nlink(2);
 	inc_nlink(req.d_count);
 	*eof = req.eof();
@@ -1124,6 +1139,7 @@ namespace rgw {
 	  << __func__
 	  << " " << object_name()
 	  << " non-0 initial write position " << off
+	  << " (mounting with -o sync required)"
 	  << dendl;
 	return -EIO;
       }
@@ -1154,6 +1170,15 @@ namespace rgw {
 	      WriteCompletion(*this));
 	}
       }
+    }
+
+    int overlap = 0;
+    if ((static_cast<off_t>(off) < f->write_req->real_ofs) &&
+        ((f->write_req->real_ofs - off) <= len)) {
+      overlap = f->write_req->real_ofs - off;
+      off = f->write_req->real_ofs;
+      buffer = static_cast<char*>(buffer) + overlap;
+      len -= overlap;
     }
 
     buffer::list bl;
@@ -1192,7 +1217,7 @@ namespace rgw {
       rc = -EIO;
     }
 
-    *bytes_written = (rc == 0) ? len : 0;
+    *bytes_written = (rc == 0) ? (len + overlap) : 0;
     return rc;
   } /* RGWFileHandle::write */
 
@@ -1318,8 +1343,13 @@ namespace rgw {
     op_ret = 0;
 
     /* check guards (e.g., contig write) */
-    if (eio)
+    if (eio) {
+      ldout(s->cct, 5)
+        << " chunks arrived in wrong order"
+        << " (mounting with -o sync required)"
+        << dendl;
       return -EIO;
+    }
 
     size_t len = data.length();
     if (! len)
@@ -1395,7 +1425,7 @@ namespace rgw {
     struct timespec omtime = rgw_fh->get_mtime();
     real_time appx_t = real_clock::now();
 
-    s->obj_size = ofs; // XXX check ofs
+    s->obj_size = bytes_written;
     perfcounter->inc(l_rgw_put_b, s->obj_size);
 
     op_ret = get_store()->check_quota(s->bucket_owner.get_id(), s->bucket,
@@ -1404,7 +1434,8 @@ namespace rgw {
       goto done;
     }
 
-    op_ret = get_store()->check_bucket_shards(s->bucket_info, s->bucket, bucket_quota);
+    op_ret = get_store()->check_bucket_shards(s->bucket_info, s->bucket,
+					      bucket_quota);
     if (op_ret < 0) {
       goto done;
     }
@@ -1450,7 +1481,10 @@ namespace rgw {
       attrbl.append(val.c_str(), val.size() + 1);
     }
 
-    rgw_get_request_metadata(s->cct, s->info, attrs);
+    op_ret = rgw_get_request_metadata(s->cct, s->info, attrs);
+    if (op_ret < 0) {
+      goto done;
+    }
     encode_delete_at_attr(delete_at, attrs);
 
     /* Add a custom metadata to expose the information whether an object
@@ -1505,7 +1539,38 @@ void rgwfile_version(int *major, int *minor, int *extra)
 
   /* stash access data for "mount" */
   RGWLibFS* new_fs = new RGWLibFS(static_cast<CephContext*>(rgw), uid, acc_key,
-				  sec_key);
+				  sec_key, "/");
+  assert(new_fs);
+
+  rc = new_fs->authorize(rgwlib.get_store());
+  if (rc != 0) {
+    delete new_fs;
+    return -EINVAL;
+  }
+
+  /* register fs for shared gc */
+  rgwlib.get_fe()->get_process()->register_fs(new_fs);
+
+  struct rgw_fs *fs = new_fs->get_fs();
+  fs->rgw = rgw;
+
+  /* XXX we no longer assume "/" is unique, but we aren't tracking the
+   * roots atm */
+
+  *rgw_fs = fs;
+
+  return 0;
+}
+
+int rgw_mount2(librgw_t rgw, const char *uid, const char *acc_key,
+               const char *sec_key, const char *root, struct rgw_fs **rgw_fs,
+               uint32_t flags)
+{
+  int rc = 0;
+
+  /* stash access data for "mount" */
+  RGWLibFS* new_fs = new RGWLibFS(static_cast<CephContext*>(rgw), uid, acc_key,
+				  sec_key, root);
   assert(new_fs);
 
   rc = new_fs->authorize(rgwlib.get_store());
@@ -1567,8 +1632,8 @@ int rgw_statfs(struct rgw_fs *rgw_fs,
   vfs_st->f_bavail = UINT64_MAX;
   vfs_st->f_files = 1024; /* object count, do we have an est? */
   vfs_st->f_ffree = UINT64_MAX;
-  vfs_st->f_fsid[0] = fs->get_inst();
-  vfs_st->f_fsid[1] = fs->get_inst();
+  vfs_st->f_fsid[0] = fs->get_fsid();
+  vfs_st->f_fsid[1] = fs->get_fsid();
   vfs_st->f_flag = 0;
   vfs_st->f_namemax = 4096;
   return 0;
@@ -1842,7 +1907,64 @@ int rgw_readdir(struct rgw_fs *rgw_fs,
     /* bad parent */
     return -EINVAL;
   }
+
+  lsubdout(parent->get_fs()->get_context(), rgw, 15)
+    << __func__
+    << " offset=" << *offset
+    << dendl;
+
+  if ((*offset == 0) &&
+      (flags & RGW_READDIR_FLAG_DOTDOT)) {
+    /* send '.' and '..' with their NFS-defined offsets */
+    rcb(".", cb_arg, 1, RGW_LOOKUP_FLAG_DIR);
+    rcb("..", cb_arg, 2, RGW_LOOKUP_FLAG_DIR);
+  }
+
   int rc = parent->readdir(rcb, cb_arg, offset, eof, flags);
+  return rc;
+} /* rgw_readdir */
+
+/* enumeration continuing from name */
+int rgw_readdir2(struct rgw_fs *rgw_fs,
+		 struct rgw_file_handle *parent_fh, const char *name,
+		 rgw_readdir_cb rcb, void *cb_arg, bool *eof,
+		 uint32_t flags)
+{
+  RGWFileHandle* parent = get_rgwfh(parent_fh);
+  if (! parent) {
+    /* bad parent */
+    return -EINVAL;
+  }
+
+  lsubdout(parent->get_fs()->get_context(), rgw, 15)
+    << __func__
+    << " offset=" << name
+    << dendl;
+
+  if ((! name) &&
+      (flags & RGW_READDIR_FLAG_DOTDOT)) {
+    /* send '.' and '..' with their NFS-defined offsets */
+    rcb(".", cb_arg, 1, RGW_LOOKUP_FLAG_DIR);
+    rcb("..", cb_arg, 2, RGW_LOOKUP_FLAG_DIR);
+  }
+
+  int rc = parent->readdir(rcb, cb_arg, name, eof, flags);
+  return rc;
+} /* rgw_readdir2 */
+
+/* project offset of dirent name */
+int rgw_dirent_offset(struct rgw_fs *rgw_fs,
+		      struct rgw_file_handle *parent_fh,
+		      const char *name, int64_t *offset,
+		      uint32_t flags)
+{
+  RGWFileHandle* parent = get_rgwfh(parent_fh);
+  if ((! parent)) {
+    /* bad parent */
+    return -EINVAL;
+  }
+  std::string sname{name};
+  int rc = parent->offset_of(sname, offset, flags);
   return rc;
 }
 
@@ -1876,8 +1998,14 @@ int rgw_write(struct rgw_fs *rgw_fs,
   if (! rgw_fh->is_file())
     return -EISDIR;
 
-  if (! rgw_fh->is_open())
-    return -EPERM;
+  if (! rgw_fh->is_open()) {
+    if (flags & RGW_OPEN_FLAG_V3) {
+      rc = rgw_fh->open(flags);
+      if (!! rc)
+	return rc;
+    } else
+      return -EPERM;
+  }
 
   rc = rgw_fh->write(offset, length, bytes_written, buffer);
 

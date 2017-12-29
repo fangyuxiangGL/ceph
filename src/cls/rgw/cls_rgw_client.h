@@ -4,6 +4,7 @@
 #include "include/str_list.h"
 #include "include/rados/librados.hpp"
 #include "cls_rgw_ops.h"
+#include "cls_rgw_const.h"
 #include "common/RefCountedObj.h"
 #include "include/compat.h"
 #include "common/ceph_time.h"
@@ -216,6 +217,15 @@ public:
       add(shard, iter->substr(pos + 1));
     }
     return 0;
+  }
+
+  // trim the '<shard-id>#' prefix from a single shard marker if present
+  static std::string get_shard_marker(const std::string& marker) {
+    auto p = marker.find(KEY_VALUE_SEPARATOR);
+    if (p == marker.npos) {
+      return marker;
+    }
+    return marker.substr(p + 1);
   }
 };
 
@@ -465,6 +475,22 @@ public:
                                  uint32_t _max_aio) : CLSRGWConcurrentIO(ioc, _bucket_objs, _max_aio), entry(_entry) {}
 };
 
+class CLSRGWIssueResyncBucketBILog : public CLSRGWConcurrentIO {
+protected:
+  int issue_op(int shard_id, const string& oid);
+public:
+  CLSRGWIssueResyncBucketBILog(librados::IoCtx& io_ctx, map<int, string>& _bucket_objs, uint32_t max_aio) :
+    CLSRGWConcurrentIO(io_ctx, _bucket_objs, max_aio) {}
+};
+
+class CLSRGWIssueBucketBILogStop : public CLSRGWConcurrentIO {
+protected:
+  int issue_op(int shard_id, const string& oid);
+public:
+  CLSRGWIssueBucketBILogStop(librados::IoCtx& io_ctx, map<int, string>& _bucket_objs, uint32_t max_aio) :
+    CLSRGWConcurrentIO(io_ctx, _bucket_objs, max_aio) {}
+};
+
 int cls_rgw_get_dir_header_async(librados::IoCtx& io_ctx, string& oid, RGWGetDirHeader_CB *ctx);
 
 void cls_rgw_encode_suggestion(char op, rgw_bucket_dir_entry& dirent, bufferlist& updates);
@@ -477,7 +503,7 @@ int cls_rgw_usage_log_read(librados::IoCtx& io_ctx, string& oid, string& user,
                            string& read_iter, map<rgw_user_bucket, rgw_usage_log_entry>& usage,
                            bool *is_truncated);
 
-void cls_rgw_usage_log_trim(librados::ObjectWriteOperation& op, string& user,
+int cls_rgw_usage_log_trim(librados::IoCtx& io_ctx, const string& oid, string& user,
                            uint64_t start_epoch, uint64_t end_epoch);
 
 void cls_rgw_usage_log_add(librados::ObjectWriteOperation& op, rgw_usage_log_info& info);

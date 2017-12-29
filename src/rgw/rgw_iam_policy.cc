@@ -8,9 +8,10 @@
 #include <utility>
 
 #include <boost/regex.hpp>
-
+#include <iostream>
 #include "rapidjson/reader.h"
 
+#include "common/backport_std.h"
 #include "rgw_auth.h"
 #include <arpa/inet.h>
 #include "rgw_iam_policy.h"
@@ -219,30 +220,13 @@ optional<ARN> ARN::parse(const string& s, bool wildcards) {
 
   if ((s == "*") && wildcards) {
     return ARN(Partition::wildcard, Service::wildcard, "*", "*", "*");
-  } else if (regex_match(s, match, wildcards ? rx_wild : rx_no_wild)) {
-    ceph_assert(match.size() == 6);
-
-    ARN a;
-    {
-      auto p = to_partition(match[1], wildcards);
-      if (!p)
-	return none;
-
-      a.partition = *p;
-    }
-    {
-      auto s = to_service(match[2], wildcards);
-      if (!s) {
-	return none;
+  } else if (regex_match(s, match, wildcards ? rx_wild : rx_no_wild) &&
+	     match.size() == 6) {
+    if (auto p = to_partition(match[1], wildcards)) {
+      if (auto s = to_service(match[2], wildcards)) {
+	return ARN(*p, *s, match[3], match[4], match[5]);
       }
-      a.service = *s;
     }
-
-    a.region = match[3];
-    a.account = match[4];
-    a.resource = match[5];
-
-    return a;
   }
   return none;
 }
@@ -389,15 +373,15 @@ bool ARN::match(const ARN& candidate) const {
     return false;
   }
 
-  if (!::match(region, candidate.region, MATCH_POLICY_ARN)) {
+  if (!match_policy(region, candidate.region, MATCH_POLICY_ARN)) {
     return false;
   }
 
-  if (!::match(account, candidate.account, MATCH_POLICY_ARN)) {
+  if (!match_policy(account, candidate.account, MATCH_POLICY_ARN)) {
     return false;
   }
 
-  if (!::match(resource, candidate.resource, MATCH_POLICY_ARN)) {
+  if (!match_policy(resource, candidate.resource, MATCH_POLICY_ARN)) {
     return false;
   }
 
@@ -473,6 +457,7 @@ struct ParseState {
 
   bool arraying = false;
   bool objecting = false;
+  bool cond_ifexists = false;
 
   void reset();
 
@@ -505,6 +490,7 @@ struct PolicyParser : public BaseReaderHandler<UTF8<>, PolicyParser> {
   CephContext* cct;
   const string& tenant;
   Policy& policy;
+  uint32_t v = 0;
 
   uint32_t seen = 0;
 
@@ -551,19 +537,59 @@ struct PolicyParser : public BaseReaderHandler<UTF8<>, PolicyParser> {
   }
   void set(TokenID in) {
     seen |= dex(in);
+    if (dex(in) & (dex(TokenID::Sid) | dex(TokenID::Effect) |
+		   dex(TokenID::Principal) | dex(TokenID::NotPrincipal) |
+		   dex(TokenID::Action) | dex(TokenID::NotAction) |
+		   dex(TokenID::Resource) | dex(TokenID::NotResource) |
+		   dex(TokenID::Condition) | dex(TokenID::AWS) |
+		   dex(TokenID::Federated) | dex(TokenID::Service) |
+		   dex(TokenID::CanonicalUser))) {
+      v |= dex(in);
+    }
   }
   void set(std::initializer_list<TokenID> l) {
     for (auto in : l) {
       seen |= dex(in);
+      if (dex(in) & (dex(TokenID::Sid) | dex(TokenID::Effect) |
+		     dex(TokenID::Principal) | dex(TokenID::NotPrincipal) |
+		     dex(TokenID::Action) | dex(TokenID::NotAction) |
+		     dex(TokenID::Resource) | dex(TokenID::NotResource) |
+		     dex(TokenID::Condition) | dex(TokenID::AWS) |
+		     dex(TokenID::Federated) | dex(TokenID::Service) |
+		     dex(TokenID::CanonicalUser))) {
+	v |= dex(in);
+      }
     }
   }
   void reset(TokenID in) {
     seen &= ~dex(in);
+    if (dex(in) & (dex(TokenID::Sid) | dex(TokenID::Effect) |
+		   dex(TokenID::Principal) | dex(TokenID::NotPrincipal) |
+		   dex(TokenID::Action) | dex(TokenID::NotAction) |
+		   dex(TokenID::Resource) | dex(TokenID::NotResource) |
+		   dex(TokenID::Condition) | dex(TokenID::AWS) |
+		   dex(TokenID::Federated) | dex(TokenID::Service) |
+		   dex(TokenID::CanonicalUser))) {
+      v &= ~dex(in);
+    }
   }
   void reset(std::initializer_list<TokenID> l) {
     for (auto in : l) {
       seen &= ~dex(in);
+      if (dex(in) & (dex(TokenID::Sid) | dex(TokenID::Effect) |
+		     dex(TokenID::Principal) | dex(TokenID::NotPrincipal) |
+		     dex(TokenID::Action) | dex(TokenID::NotAction) |
+		     dex(TokenID::Resource) | dex(TokenID::NotResource) |
+		     dex(TokenID::Condition) | dex(TokenID::AWS) |
+		     dex(TokenID::Federated) | dex(TokenID::Service) |
+		     dex(TokenID::CanonicalUser))) {
+	v &= ~dex(in);
+      }
     }
+  }
+  void reset(uint32_t& v) {
+    seen &= ~v;
+    v = 0;
   }
 
   PolicyParser(CephContext* cct, const string& tenant, Policy& policy)
@@ -583,14 +609,12 @@ struct PolicyParser : public BaseReaderHandler<UTF8<>, PolicyParser> {
     if (s.empty()) {
       return false;
     }
-
     return s.back().obj_end();
   }
   bool Key(const char* str, SizeType length, bool copy) {
     if (s.empty()) {
       return false;
     }
-
     return s.back().key(str, length);
   }
 
@@ -598,7 +622,6 @@ struct PolicyParser : public BaseReaderHandler<UTF8<>, PolicyParser> {
     if (s.empty()) {
       return false;
     }
-
     return s.back().do_string(cct, str, length);
   }
   bool RawNumber(const char* str, SizeType length, bool copy) {
@@ -645,13 +668,24 @@ bool ParseState::obj_end() {
 }
 
 bool ParseState::key(const char* s, size_t l) {
-  auto k = pp->tokens.lookup(s, l);
+  auto token_len = l;
+  bool ifexists = false;
+  if (w->id == TokenID::Condition && w->kind == TokenKind::statement) {
+    static constexpr char IfExists[] = "IfExists";
+    if (boost::algorithm::ends_with(boost::string_view{s, l}, IfExists)) {
+      ifexists = true;
+      token_len -= sizeof(IfExists)-1;
+    }
+  }
+  auto k = pp->tokens.lookup(s, token_len);
 
   if (!k) {
     if (w->kind == TokenKind::cond_op) {
+      auto id = w->id;
       auto& t = pp->policy.statements.back();
+      auto c_ife =  cond_ifexists;
       pp->s.emplace_back(pp, cond_key);
-      t.conditions.emplace_back(w->id, s, l);
+      t.conditions.emplace_back(id, s, l, c_ife);
       return true;
     } else {
       return false;
@@ -661,7 +695,6 @@ bool ParseState::key(const char* s, size_t l) {
   // If the token we're going with belongs within the condition at the
   // top of the stack and we haven't already encountered it, push it
   // on the stack
-
   // Top
   if ((((w->id == TokenID::Top) && (k->kind == TokenKind::top)) ||
        // Statement
@@ -680,6 +713,7 @@ bool ParseState::key(const char* s, size_t l) {
   } else if ((w->id == TokenID::Condition) &&
 	     (k->kind == TokenKind::cond_op)) {
     pp->s.emplace_back(pp, k);
+    pp->s.back().cond_ifexists = ifexists;
     return true;
   }
   return false;
@@ -688,7 +722,7 @@ bool ParseState::key(const char* s, size_t l) {
 // I should just rewrite a few helper functions to use iterators,
 // which will make all of this ever so much nicer.
 static optional<Principal> parse_principal(CephContext* cct, TokenID t,
-				    string&& s) {
+					   string&& s) {
   // Wildcard!
   if ((t == TokenID::AWS) && (s == "*")) {
     return Principal::wildcard();
@@ -698,8 +732,27 @@ static optional<Principal> parse_principal(CephContext* cct, TokenID t,
 
     // AWS ARNs
   } else if (t == TokenID::AWS) {
-    auto a = ARN::parse(s);
-    if (!a) {
+    if (auto a = ARN::parse(s)) {
+      if (a->resource == "root") {
+	return Principal::tenant(std::move(a->account));
+      }
+
+      static const char rx_str[] = "([^/]*)/(.*)";
+      static const regex rx(rx_str, sizeof(rx_str) - 1,
+			    ECMAScript | optimize);
+      smatch match;
+      if (regex_match(a->resource, match, rx) && match.size() == 3) {
+	if (match[1] == "user") {
+	  return Principal::user(std::move(a->account),
+				 match[2]);
+	}
+
+	if (match[1] == "role") {
+	  return Principal::role(std::move(a->account),
+				 match[2]);
+	}
+      }
+    } else {
       if (std::none_of(s.begin(), s.end(),
 		       [](const char& c) {
 			 return (c == ':') || (c == '/');
@@ -708,28 +761,6 @@ static optional<Principal> parse_principal(CephContext* cct, TokenID t,
 	// way to see if one exists or not. So we return the thing and
 	// let them try to match against it.
 	return Principal::tenant(std::move(s));
-      }
-    }
-
-    if (a->resource == "root") {
-      return Principal::tenant(std::move(a->account));
-    }
-
-    static const char rx_str[] = "([^/]*)/(.*)";
-    static const regex rx(rx_str, sizeof(rx_str) - 1,
-			  ECMAScript | optimize);
-    smatch match;
-    if (regex_match(a->resource, match, rx)) {
-      ceph_assert(match.size() == 3);
-
-      if (match[1] == "user") {
-	return Principal::user(std::move(a->account),
-			       match[2]);
-      }
-
-      if (match[1] == "role") {
-	return Principal::role(std::move(a->account),
-			       match[2]);
       }
     }
   }
@@ -741,6 +772,8 @@ static optional<Principal> parse_principal(CephContext* cct, TokenID t,
 bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
   auto k = pp->tokens.lookup(s, l);
   Policy& p = pp->policy;
+  bool is_action = false;
+  bool is_validaction = false;
   Statement* t = p.statements.empty() ? nullptr : &(p.statements.back());
 
   // Top level!
@@ -763,8 +796,10 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
     t->noprinc.emplace(Principal::wildcard());
   } else if ((w->id == TokenID::Action) ||
 	     (w->id == TokenID::NotAction)) {
+    is_action = true;
     for (auto& p : actpairs) {
-      if (match({s, l}, p.name, MATCH_POLICY_ACTION)) {
+      if (match_policy({s, l}, p.name, MATCH_POLICY_ACTION)) {
+        is_validaction = true;
 	(w->id == TokenID::Action ? t->action : t->notaction) |= p.bit;
       }
     }
@@ -788,13 +823,16 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
     // Principals
 
   } else if (w->kind == TokenKind::princ_type) {
-    ceph_assert(pp->s.size() > 1);
+    if (pp->s.size() <= 1) {
+      return false;
+    }
     auto& pri = pp->s[pp->s.size() - 2].w->id == TokenID::Principal ?
       t->princ : t->noprinc;
 
-    auto o = parse_principal(pp->cct, w->id, string(s, l));
-    if (o)
+
+    if (auto o = parse_principal(pp->cct, w->id, string(s, l))) {
       pri.emplace(std::move(*o));
+    }
 
     // Failure
 
@@ -804,6 +842,10 @@ bool ParseState::do_string(CephContext* cct, const char* s, size_t l) {
 
   if (!arraying) {
     pp->s.pop_back();
+  }
+
+  if (is_action && !is_validaction){
+    return false;
   }
 
   return true;
@@ -829,16 +871,14 @@ bool ParseState::number(const char* s, size_t l) {
 }
 
 void ParseState::reset() {
-  pp->reset({TokenID::Sid, TokenID::Effect, TokenID::Principal,
-	TokenID::NotPrincipal, TokenID::Action, TokenID::NotAction,
-	TokenID::Resource, TokenID::NotResource, TokenID::Condition});
+  pp->reset(pp->v);
 }
 
 bool ParseState::obj_start() {
   if (w->objectable && !objecting) {
     objecting = true;
     if (w->id == TokenID::Statement) {
-      pp->policy.statements.push_back({});
+      pp->policy.statements.emplace_back();
     }
 
     return true;
@@ -888,12 +928,6 @@ ostream& operator <<(ostream& m, const MaskedIP& ip) {
   return m;
 }
 
-string to_string(const MaskedIP& m) {
-  stringstream ss;
-  ss << m;
-  return ss.str();
-}
-
 bool Condition::eval(const Environment& env) const {
   auto i = env.find(key);
   if (op == TokenID::Null) {
@@ -901,7 +935,7 @@ bool Condition::eval(const Environment& env) const {
   }
 
   if (i == env.end()) {
-    return false;
+    return ifexists;
   }
   const auto& s = i->second;
 
@@ -911,28 +945,27 @@ bool Condition::eval(const Environment& env) const {
     return orrible(std::equal_to<std::string>(), s, vals);
 
   case TokenID::StringNotEquals:
-    return orrible(std::not2(std::equal_to<std::string>()),
+    return orrible(ceph::not_fn(std::equal_to<std::string>()),
 		   s, vals);
 
   case TokenID::StringEqualsIgnoreCase:
     return orrible(ci_equal_to(), s, vals);
 
   case TokenID::StringNotEqualsIgnoreCase:
-    return orrible(std::not2(ci_equal_to()), s, vals);
+    return orrible(ceph::not_fn(ci_equal_to()), s, vals);
 
-    // Implement actual StringLike with wildcarding later
   case TokenID::StringLike:
-    return orrible(std::equal_to<std::string>(), s, vals);
+    return orrible(string_like(), s, vals);
+
   case TokenID::StringNotLike:
-    return orrible(std::not2(std::equal_to<std::string>()),
-		   s, vals);
+    return orrible(ceph::not_fn(string_like()), s, vals);
 
     // Numeric
   case TokenID::NumericEquals:
     return shortible(std::equal_to<double>(), as_number, s, vals);
 
   case TokenID::NumericNotEquals:
-    return shortible(std::not2(std::equal_to<double>()),
+    return shortible(ceph::not_fn(std::equal_to<double>()),
 		     as_number, s, vals);
 
 
@@ -954,7 +987,7 @@ bool Condition::eval(const Environment& env) const {
     return shortible(std::equal_to<ceph::real_time>(), as_date, s, vals);
 
   case TokenID::DateNotEquals:
-    return shortible(std::not2(std::equal_to<ceph::real_time>()),
+    return shortible(ceph::not_fn(std::equal_to<ceph::real_time>()),
 		     as_date, s, vals);
 
   case TokenID::DateLessThan:
@@ -985,7 +1018,7 @@ bool Condition::eval(const Environment& env) const {
     return shortible(std::equal_to<MaskedIP>(), as_network, s, vals);
 
   case TokenID::NotIpAddress:
-    return shortible(std::not2(std::equal_to<MaskedIP>()), as_network, s,
+    return shortible(ceph::not_fn(std::equal_to<MaskedIP>()), as_network, s,
 		     vals);
 
 #if 0
@@ -1005,7 +1038,8 @@ optional<MaskedIP> Condition::as_network(const string& s) {
     return none;
   }
 
-  m.v6 = s.find(':');
+  m.v6 = (s.find(':') == string::npos) ? false : true;
+
   auto slash = s.find('/');
   if (slash == string::npos) {
     m.prefix = m.v6 ? 128 : 32;
@@ -1028,7 +1062,7 @@ optional<MaskedIP> Condition::as_network(const string& s) {
 
   if (m.v6) {
     struct sockaddr_in6 a;
-    if (inet_pton(AF_INET6, p->c_str(), static_cast<void*>(&a)) != 1) {
+    if (inet_pton(AF_INET6, p->c_str(), static_cast<void*>(&a.sin6_addr)) != 1) {
       return none;
     }
 
@@ -1050,13 +1084,13 @@ optional<MaskedIP> Condition::as_network(const string& s) {
     m.addr |= Address(a.sin6_addr.s6_addr[15]) << 120;
   } else {
     struct sockaddr_in a;
-    if (inet_pton(AF_INET, p->c_str(), static_cast<void*>(&a)) != 1) {
+    if (inet_pton(AF_INET, p->c_str(), static_cast<void*>(&a.sin_addr)) != 1) {
       return none;
     }
     m.addr = ntohl(a.sin_addr.s_addr);
   }
 
-  return none;
+  return m;
 }
 
 namespace {
@@ -1152,38 +1186,33 @@ const char* condop_string(const TokenID t) {
 template<typename Iterator>
 ostream& print_array(ostream& m, Iterator begin, Iterator end) {
   if (begin == end) {
-    m << "[";
+    m << "[]";
   } else {
-    auto beforelast = end - 1;
     m << "[ ";
-    for (auto i = begin; i != end; ++i) {
-      m << *i;
-      if (i != beforelast) {
-	m << ", ";
-      } else {
-	m << " ";
-      }
-    }
+    std::copy(begin, end, ceph::make_ostream_joiner(m, ", "));
+    m << " ]";
   }
-  m << "]";
   return m;
 }
+
+template<typename Iterator>
+ostream& print_dict(ostream& m, Iterator begin, Iterator end) {
+  m << "{ ";
+  std::copy(begin, end, ceph::make_ostream_joiner(m, ", "));
+  m << " }";
+  return m;
+}
+
 }
 
 ostream& operator <<(ostream& m, const Condition& c) {
-  m << "{ " << condop_string(c.op);
+  m << condop_string(c.op);
   if (c.ifexists) {
     m << "IfExists";
   }
   m << ": { " << c.key;
   print_array(m, c.vals.cbegin(), c.vals.cend());
-  return m << "}";
-}
-
-string to_string(const Condition& c) {
-  stringstream ss;
-  ss << c;
-  return ss.str();
+  return m << " }";
 }
 
 Effect Statement::eval(const Environment& e,
@@ -1389,13 +1418,13 @@ ostream& print_actions(ostream& m, const uint64_t a) {
   bool begun = false;
   m << "[ ";
   for (auto i = 0U; i < s3Count; ++i) {
-    if (a & (1 << i)) {
+    if (a & (1ULL << i)) {
       if (begun) {
-	m << ", ";
+        m << ", ";
       } else {
-	begun = true;
+        begun = true;
       }
-      m << action_bit_string(1 << i);
+      m << action_bit_string(1ULL << i);
     }
   }
   if (begun) {
@@ -1414,12 +1443,12 @@ ostream& operator <<(ostream& m, const Statement& s) {
   }
   if (!s.princ.empty()) {
     m << "Principal: ";
-    print_array(m, s.princ.cbegin(), s.princ.cend());
+    print_dict(m, s.princ.cbegin(), s.princ.cend());
     m << ", ";
   }
   if (!s.noprinc.empty()) {
     m << "NotPrincipal: ";
-    print_array(m, s.noprinc.cbegin(), s.noprinc.cend());
+    print_dict(m, s.noprinc.cbegin(), s.noprinc.cend());
     m << ", ";
   }
 
@@ -1473,16 +1502,10 @@ ostream& operator <<(ostream& m, const Statement& s) {
 
   if (!s.conditions.empty()) {
     m << "Condition: ";
-    print_array(m, s.conditions.cbegin(), s.conditions.cend());
+    print_dict(m, s.conditions.cbegin(), s.conditions.cend());
   }
 
   return m << " }";
-}
-
-string to_string(const Statement& s) {
-  stringstream m;
-  m << s;
-  return m.str();
 }
 
 Policy::Policy(CephContext* cct, const string& tenant,
@@ -1533,12 +1556,6 @@ ostream& operator <<(ostream& m, const Policy& p) {
     m << ", ";
   }
   return m << " }";
-}
-
-string to_string(const Policy& p) {
-  stringstream s;
-  s << p;
-  return s.str();
 }
 
 }

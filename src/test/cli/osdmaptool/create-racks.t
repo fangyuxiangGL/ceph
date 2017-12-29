@@ -16,7 +16,6 @@
   tunable allowed_bucket_algs 54
   
   # devices
-  device 0 device0
   device 1 osd.1
   device 2 osd.2
   device 3 osd.3
@@ -769,7 +768,7 @@
   
   # rules
   rule replicated_rule {
-  \truleset 0 (esc)
+  \tid 0 (esc)
   \ttype replicated (esc)
   \tmin_size 1 (esc)
   \tmax_size 10 (esc)
@@ -797,7 +796,7 @@
   nearfull_ratio 0
   min_compat_client jewel
   
-  pool 1 'rbd' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 15296 pgp_num 15296 last_change 0 flags hashpspool stripe_width 0
+  pool 1 'rbd' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 15296 pgp_num 15296 last_change 0 flags hashpspool stripe_width 0 application rbd
   
   max_osd 239
   
@@ -807,5 +806,5 @@
   osdmaptool: writing epoch 1 to om
   $ osdmaptool --print om | grep 'pool 1'
   osdmaptool: osdmap file 'om'
-  pool 1 'rbd' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 15296 pgp_num 15296 last_change 0 flags hashpspool stripe_width 0
+  pool 1 'rbd' replicated size 3 min_size 2 crush_rule 0 object_hash rjenkins pg_num 15296 pgp_num 15296 last_change 0 flags hashpspool stripe_width 0 application rbd
   $ rm -f om

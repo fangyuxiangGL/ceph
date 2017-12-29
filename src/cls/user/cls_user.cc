@@ -163,7 +163,6 @@ static int cls_user_set_buckets_info(cls_method_context_t hctx, bufferlist *in, 
     if (!op.add){
       apply_entry_stats(update_entry, &entry);
     }
-
     entry.user_stats_sync = true;
 
     ret = write_entry(hctx, key, entry);
@@ -292,8 +291,9 @@ static int cls_user_list_buckets(cls_method_context_t hctx, bufferlist *in, buff
     max_entries = MAX_ENTRIES;
 
   string match_prefix;
+  cls_user_list_buckets_ret ret;
 
-  int rc = cls_cxx_map_get_vals(hctx, from_index, match_prefix, max_entries + 1, &keys);
+  int rc = cls_cxx_map_get_vals(hctx, from_index, match_prefix, max_entries, &keys, &ret.truncated);
   if (rc < 0)
     return rc;
 
@@ -301,21 +301,20 @@ static int cls_user_list_buckets(cls_method_context_t hctx, bufferlist *in, buff
           from_index.c_str(),
           to_index.c_str(),
           match_prefix.c_str());
-  cls_user_list_buckets_ret ret;
 
   list<cls_user_bucket_entry>& entries = ret.entries;
   map<string, bufferlist>::iterator iter = keys.begin();
 
-  bool done = false;
   string marker;
 
-  size_t i;
-  for (i = 0; i < max_entries && iter != keys.end(); ++i, ++iter) {
+  for (; iter != keys.end(); ++iter) {
     const string& index = iter->first;
     marker = index;
 
-    if (to_index_valid && to_index.compare(index) <= 0)
+    if (to_index_valid && to_index.compare(index) <= 0) {
+      ret.truncated = false;
       break;
+    }
 
     bufferlist& bl = iter->second;
     bufferlist::iterator biter = bl.begin();
@@ -328,12 +327,9 @@ static int cls_user_list_buckets(cls_method_context_t hctx, bufferlist *in, buff
     }
   }
 
-  if (iter == keys.end())
-    done = true;
-  else
+  if (ret.truncated) {
     ret.marker = marker;
-
-  ret.truncated = !done;
+  }
 
   ::encode(ret, *out);
 

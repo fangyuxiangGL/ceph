@@ -11,6 +11,7 @@
 #include "common/Formatter.h"
 #include "common/ceph_json.h"
 #include "common/RWLock.h"
+#include "common/backport_std.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
 
@@ -25,7 +26,6 @@
 
 #define dout_subsys ceph_subsys_rgw
 
-using namespace std;
 
 
 static RGWMetadataHandler *user_meta_handler = NULL;
@@ -90,6 +90,42 @@ int rgw_user_sync_all_stats(RGWRados *store, const rgw_user& user_id)
     cerr << "ERROR: failed to complete syncing user stats: ret=" << ret << std::endl;
     return ret;
   }
+
+  return 0;
+}
+
+int rgw_user_get_all_buckets_stats(RGWRados *store, const rgw_user& user_id, map<string, cls_user_bucket_entry>&buckets_usage_map)
+{
+  CephContext *cct = store->ctx();
+  size_t max_entries = cct->_conf->rgw_list_buckets_max_chunk;
+  bool done;
+  bool is_truncated;
+  string marker;
+  int ret;
+
+  do {
+    RGWUserBuckets user_buckets;
+    ret = rgw_read_user_buckets(store, user_id, user_buckets, marker,
+				string(), max_entries, false, &is_truncated);
+    if (ret < 0) {
+      ldout(cct, 0) << "failed to read user buckets: ret=" << ret << dendl;
+      return ret;
+    }
+    map<string, RGWBucketEnt>& buckets = user_buckets.get_buckets();
+    for (const auto& i :  buckets) {
+      marker = i.first;
+
+      const RGWBucketEnt& bucket_ent = i.second;
+      cls_user_bucket_entry entry;
+      ret = store->cls_user_get_bucket_stats(bucket_ent.bucket, entry);
+      if (ret < 0) {
+        ldout(cct, 0) << "ERROR: could not get bucket stats: ret=" << ret << dendl;
+        return ret;
+      }
+      buckets_usage_map.emplace(bucket_ent.bucket.name, entry);
+    }
+    done = (buckets.size() < max_entries);
+  } while (!done);
 
   return 0;
 }
@@ -542,6 +578,18 @@ uint32_t rgw_str_to_perm(const char *str)
   return RGW_PERM_INVALID;
 }
 
+int rgw_validate_tenant_name(const string& t)
+{
+  struct tench {
+    static bool is_good(char ch) {
+      return isalnum(ch) || ch == '_';
+    }
+  };
+  std::string::const_iterator it =
+    std::find_if_not(t.begin(), t.end(), tench::is_good);
+  return (it == t.end())? 0: -ERR_INVALID_TENANT_NAME;
+}
+
 static bool validate_access_key(string& key)
 {
   const char *p = key.c_str();
@@ -854,7 +902,6 @@ int RGWAccessKeyPool::generate_key(RGWUserAdminOpState& op_state, std::string *e
   RGWAccessKey new_key;
   RGWUserInfo duplicate_check;
 
-  int ret = 0;
   int key_type = op_state.get_key_type();
   bool gen_access = op_state.will_gen_access();
   bool gen_secret = op_state.will_gen_secret();
@@ -907,13 +954,7 @@ int RGWAccessKeyPool::generate_key(RGWUserAdminOpState& op_state, std::string *e
     key = op_state.get_secret_key();
   } else {
     char secret_key_buf[SECRET_KEY_LEN + 1];
-
-    ret = gen_rand_alphanumeric_plain(g_ceph_context, secret_key_buf, sizeof(secret_key_buf));
-    if (ret < 0) {
-      set_err_msg(err_msg, "unable to generate secret key");
-      return ret;
-    }
-
+    gen_rand_alphanumeric_plain(g_ceph_context, secret_key_buf, sizeof(secret_key_buf));
     key = secret_key_buf;
   }
 
@@ -923,14 +964,7 @@ int RGWAccessKeyPool::generate_key(RGWUserAdminOpState& op_state, std::string *e
 
     do {
       int id_buf_size = sizeof(public_id_buf);
-      ret = gen_rand_alphanumeric_upper(g_ceph_context,
-               public_id_buf, id_buf_size);
-
-      if (ret < 0) {
-        set_err_msg(err_msg, "unable to generate access key");
-        return ret;
-      }
-
+      gen_rand_alphanumeric_upper(g_ceph_context, public_id_buf, id_buf_size);
       id = public_id_buf;
       if (!validate_access_key(id))
         continue;
@@ -1019,15 +1053,8 @@ int RGWAccessKeyPool::modify_key(RGWUserAdminOpState& op_state, std::string *err
 
   if (op_state.will_gen_secret()) {
     char secret_key_buf[SECRET_KEY_LEN + 1];
-
-    int ret;
     int key_buf_size = sizeof(secret_key_buf);
-    ret = gen_rand_alphanumeric_plain(g_ceph_context, secret_key_buf, key_buf_size);
-    if (ret < 0) {
-      set_err_msg(err_msg, "unable to generate secret key");
-      return ret;
-    }
-
+    gen_rand_alphanumeric_plain(g_ceph_context, secret_key_buf, key_buf_size);
     key = secret_key_buf;
   }
 
@@ -1711,7 +1738,7 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
 {
   bool found = false;
   std::string swift_user;
-  rgw_user& uid = op_state.get_user_id();
+  user_id = op_state.get_user_id();
   std::string user_email = op_state.get_user_email();
   std::string access_key = op_state.get_access_key();
   std::string subuser = op_state.get_subuser();
@@ -1726,16 +1753,16 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
 
   clear_populated();
 
-  if (uid.empty() && !subuser.empty()) {
+  if (user_id.empty() && !subuser.empty()) {
     size_t pos = subuser.find(':');
     if (pos != string::npos) {
-      uid = subuser.substr(0, pos);
-      op_state.set_user_id(uid);
+      user_id = subuser.substr(0, pos);
+      op_state.set_user_id(user_id);
     }
   }
 
-  if (!uid.empty() && (uid.compare(RGW_USER_ANON_ID) != 0)) {
-    found = (rgw_get_user_info_by_uid(store, uid, user_info, &op_state.objv) >= 0);
+  if (!user_id.empty() && (user_id.compare(RGW_USER_ANON_ID) != 0)) {
+    found = (rgw_get_user_info_by_uid(store, user_id, user_info, &op_state.objv) >= 0);
     op_state.found_by_uid = found;
   }
   if (!user_email.empty() && !found) {
@@ -1760,7 +1787,9 @@ int RGWUser::init(RGWUserAdminOpState& op_state)
     set_populated();
   }
 
-  user_id = user_info.user_id;
+  if (user_id.empty()) {
+    user_id = user_info.user_id;
+  }
   op_state.set_initialized();
 
   // this may have been called by a helper object
@@ -1848,6 +1877,13 @@ int RGWUser::check_op(RGWUserAdminOpState& op_state, std::string *err_msg)
             + " does not match: " + user_id.to_str());
 
     return -EINVAL;
+  }
+
+  int ret = rgw_validate_tenant_name(op_id.tenant);
+  if (ret) {
+    set_err_msg(err_msg,
+		"invalid tenant only alphanumeric and _ characters are allowed");
+    return ret;
   }
 
   //set key type when it not set or set by context
@@ -2307,6 +2343,13 @@ int RGWUserAdminOp_User::info(RGWRados *store, RGWUserAdminOpState& op_state,
   if (ret < 0)
     return ret;
 
+  if (op_state.sync_stats) {
+    ret = rgw_user_sync_all_stats(store, info.user_id);
+    if (ret < 0) {
+      return ret;
+    }
+  }
+
   RGWStorageStats stats;
   RGWStorageStats *arg_stats = NULL;
   if (op_state.fetch_stats) {
@@ -2717,13 +2760,19 @@ public:
     pool = store->get_zone_params().user_uid_pool;
   }
 
-  int list_keys_init(RGWRados *store, void **phandle) override
+  int list_keys_init(RGWRados *store, const string& marker, void **phandle) override
   {
-    list_keys_info *info = new list_keys_info;
+    auto info = std::make_unique<list_keys_info>();
 
     info->store = store;
 
-    *phandle = (void *)info;
+    int ret = store->list_raw_objects_init(store->get_zone_params().user_uid_pool, marker,
+                                           &info->ctx);
+    if (ret < 0) {
+      return ret;
+    }
+
+    *phandle = (void *)info.release();
 
     return 0;
   }
@@ -2739,8 +2788,8 @@ public:
 
     list<string> unfiltered_keys;
 
-    int ret = store->list_raw_objects(store->get_zone_params().user_uid_pool, no_filter,
-                                      max, info->ctx, unfiltered_keys, truncated);
+    int ret = store->list_raw_objects_next(no_filter, max, info->ctx,
+                                           unfiltered_keys, truncated);
     if (ret < 0 && ret != -ENOENT)
       return ret;		        
     if (ret == -ENOENT) {
@@ -2765,6 +2814,11 @@ public:
   void list_keys_complete(void *handle) override {
     list_keys_info *info = static_cast<list_keys_info *>(handle);
     delete info;
+  }
+
+  string get_marker(void *handle) {
+    list_keys_info *info = static_cast<list_keys_info *>(handle);
+    return info->store->list_raw_objs_get_cursor(info->ctx);
   }
 };
 

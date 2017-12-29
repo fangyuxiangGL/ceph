@@ -34,47 +34,20 @@ class RDMAServerSocketImpl;
 class RDMAStack;
 class RDMAWorker;
 
-enum {
-  l_msgr_rdma_dispatcher_first = 94000,
-
-  l_msgr_rdma_polling,
-  l_msgr_rdma_inflight_tx_chunks,
-  l_msgr_rdma_inqueue_rx_chunks,
-
-  l_msgr_rdma_tx_total_wc,
-  l_msgr_rdma_tx_total_wc_errors,
-  l_msgr_rdma_tx_wc_retry_errors,
-  l_msgr_rdma_tx_wc_wr_flush_errors,
-
-  l_msgr_rdma_rx_total_wc,
-  l_msgr_rdma_rx_total_wc_errors,
-  l_msgr_rdma_rx_fin,
-
-  l_msgr_rdma_handshake_errors,
-
-  l_msgr_rdma_total_async_events,
-  l_msgr_rdma_async_last_wqe_events,
-
-  l_msgr_rdma_created_queue_pair,
-  l_msgr_rdma_active_queue_pair,
-
-  l_msgr_rdma_dispatcher_last,
-};
-
-
 class RDMADispatcher {
   typedef Infiniband::MemoryManager::Chunk Chunk;
   typedef Infiniband::QueuePair QueuePair;
 
   std::thread t;
   CephContext *cct;
-  Infiniband::CompletionQueue* tx_cq;
-  Infiniband::CompletionQueue* rx_cq;
-  Infiniband::CompletionChannel *tx_cc, *rx_cc;
+  Infiniband::CompletionQueue* tx_cq = nullptr;
+  Infiniband::CompletionQueue* rx_cq = nullptr;
+  Infiniband::CompletionChannel *tx_cc = nullptr, *rx_cc = nullptr;
   EventCallbackRef async_handler;
   bool done = false;
   std::atomic<uint64_t> num_dead_queue_pair = {0};
   std::atomic<uint64_t> num_qp_conn = {0};
+  int post_backlog = 0;
   Mutex lock; // protect `qp_conns`, `dead_queue_pairs`
   // qp_num -> InfRcConnection
   // The main usage of `qp_conns` is looking up connection by qp_num,
@@ -108,7 +81,7 @@ class RDMADispatcher {
     RDMADispatcher *dispatcher;
    public:
     C_handle_cq_async(RDMADispatcher *w): dispatcher(w) {}
-    void do_request(int fd) {
+    void do_request(uint64_t fd) {
       // worker->handle_tx_event();
       dispatcher->handle_async_event();
     }
@@ -135,6 +108,7 @@ class RDMADispatcher {
   }
   RDMAStack* get_stack() { return stack; }
   RDMAConnectedSocketImpl* get_conn_lockless(uint32_t qp);
+  QueuePair* get_qp(uint32_t qp);
   void erase_qpn_lockless(uint32_t qpn);
   void erase_qpn(uint32_t qpn);
   Infiniband::CompletionQueue* get_tx_cq() const { return tx_cq; }
@@ -144,24 +118,9 @@ class RDMADispatcher {
   void post_tx_buffer(std::vector<Chunk*> &chunks);
 
   std::atomic<uint64_t> inflight = {0};
-};
 
+  void post_chunk_to_pool(Chunk* chunk); 
 
-enum {
-  l_msgr_rdma_first = 95000,
-
-  l_msgr_rdma_tx_no_mem,
-  l_msgr_rdma_tx_parital_mem,
-  l_msgr_rdma_tx_failed,
-  l_msgr_rdma_rx_no_registered_mem,
-
-  l_msgr_rdma_tx_chunks,
-  l_msgr_rdma_tx_bytes,
-  l_msgr_rdma_rx_chunks,
-  l_msgr_rdma_rx_bytes,
-  l_msgr_rdma_pending_sent_conns,
-
-  l_msgr_rdma_last,
 };
 
 class RDMAWorker : public Worker {
@@ -180,7 +139,7 @@ class RDMAWorker : public Worker {
     RDMAWorker *worker;
     public:
     C_handle_cq_tx(RDMAWorker *w): worker(w) {}
-    void do_request(int fd) {
+    void do_request(uint64_t fd) {
       worker->handle_pending_message();
     }
   };
@@ -268,7 +227,7 @@ class RDMAConnectedSocketImpl : public ConnectedSocketImpl {
     bool active;
    public:
     C_handle_connection(RDMAConnectedSocketImpl *w): csi(w), active(true) {}
-    void do_request(int fd) {
+    void do_request(uint64_t fd) {
       if (active)
         csi->handle_connection();
     }
@@ -299,8 +258,9 @@ class RDMAServerSocketImpl : public ServerSocketImpl {
 
 class RDMAStack : public NetworkStack {
   vector<std::thread> threads;
-  RDMADispatcher *dispatcher;
   PerfCounters *perf_counter;
+  Infiniband ib;
+  RDMADispatcher dispatcher;
 
   std::atomic<bool> fork_finished = {false};
 
@@ -312,10 +272,11 @@ class RDMAStack : public NetworkStack {
 
   virtual void spawn_worker(unsigned i, std::function<void ()> &&func) override;
   virtual void join_worker(unsigned i) override;
-  RDMADispatcher *get_dispatcher() { return dispatcher; }
-
+  RDMADispatcher &get_dispatcher() { return dispatcher; }
+  Infiniband &get_infiniband() { return ib; }
   virtual bool is_ready() override { return fork_finished.load(); };
   virtual void ready() override { fork_finished = true; };
 };
+
 
 #endif

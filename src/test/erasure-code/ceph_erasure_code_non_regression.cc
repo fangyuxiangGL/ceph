@@ -98,7 +98,7 @@ int ErasureCodeNonRegression::setup(int argc, char** argv) {
   g_ceph_context->_conf->apply_changes(NULL);
   const char* env = getenv("CEPH_LIB");
   std::string libs_dir(env ? env : ".libs");
-  g_conf->set_val("erasure_code_dir", libs_dir, false);
+  g_conf->set_val_or_die("erasure_code_dir", libs_dir, false);
 
   if (vm.count("help")) {
     cout << desc << std::endl;
@@ -209,7 +209,7 @@ int ErasureCodeNonRegression::decode_erasures(ErasureCodeInterfaceRef erasure_co
       
   }
   map<int,bufferlist> decoded;
-  int code = erasure_code->decode(erasures, available, &decoded);
+  int code = erasure_code->decode(erasures, available, &decoded, 0);
   if (code)
     return code;
   for (set<int>::iterator erasure = erasures.begin();

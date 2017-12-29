@@ -143,7 +143,7 @@ int execute_remove(const po::variables_map &vm) {
 }
 
 std::string delete_status(time_t deferment_end_time) {
-  time_t now = ceph_clock_gettime();
+  time_t now = time(nullptr);
 
   std::string time_str = ctime(&deferment_end_time);
   time_str = time_str.substr(0, time_str.length() - 1);
@@ -197,6 +197,7 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
     tbl.define_column("SOURCE", TextTable::LEFT, TextTable::LEFT);
     tbl.define_column("DELETED_AT", TextTable::LEFT, TextTable::LEFT);
     tbl.define_column("STATUS", TextTable::LEFT, TextTable::LEFT);
+    tbl.define_column("PARENT", TextTable::LEFT, TextTable::LEFT);
   }
 
   for (const auto& entry : trash_entries) {
@@ -233,6 +234,18 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
     std::string time_str = ctime(&entry.deletion_time);
     time_str = time_str.substr(0, time_str.length() - 1);
 
+    bool has_parent = false;
+    std::string pool, image, snap, parent;
+    r = im.parent_info(&pool, &image, &snap);
+    if (r == -ENOENT) {
+      r = 0;
+    } else if (r < 0) {
+      return r;
+    } else {
+      parent = pool + "/" + image + "@" + snap;
+      has_parent = true;
+    }
+
     if (f) {
       f->open_object_section("image");
       f->dump_string("id", entry.id);
@@ -241,14 +254,23 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
       f->dump_string("deleted_at", time_str);
       f->dump_string("status",
                      delete_status(entry.deferment_end_time));
+      if (has_parent) {
+        f->open_object_section("parent");
+        f->dump_string("pool", pool);
+        f->dump_string("image", image);
+        f->dump_string("snapshot", snap);
+        f->close_section();
+      }
       f->close_section();
     } else {
       tbl << entry.id
           << entry.name
           << del_source
           << time_str
-          << delete_status(entry.deferment_end_time)
-          << TextTable::endrow;
+          << delete_status(entry.deferment_end_time);
+      if (has_parent)
+        tbl << parent;
+      tbl << TextTable::endrow;
     }
   }
 
@@ -351,11 +373,11 @@ int execute_restore(const po::variables_map &vm) {
 
 
 Shell::Action action_move(
-    {"trash", "move"}, {"trash", "mv"}, "Moves an image to the trash.", "",
+    {"trash", "move"}, {"trash", "mv"}, "Move an image to the trash.", "",
     &get_move_arguments, &execute_move);
 
 Shell::Action action_remove(
-  {"trash", "remove"}, {"trash", "rm"}, "Removes an image from trash.", "",
+  {"trash", "remove"}, {"trash", "rm"}, "Remove an image from trash.", "",
   &get_remove_arguments, &execute_remove);
 
 Shell::SwitchArguments switched_arguments({"long", "l"});
@@ -364,7 +386,7 @@ Shell::Action action_list(
   &get_list_arguments, &execute_list);
 
 Shell::Action action_restore(
-    {"trash", "restore"}, {}, "Restores an image from trash.", "",
+    {"trash", "restore"}, {}, "Restore an image from trash.", "",
     &get_restore_arguments, &execute_restore);
 
 } // namespace trash

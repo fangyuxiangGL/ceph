@@ -28,6 +28,7 @@ set(rbd_srcs
   action/MirrorImage.cc
   action/Nbd.cc
   action/ObjectMap.cc
+  action/Pool.cc
   action/Remove.cc
   action/Rename.cc
   action/Resize.cc
@@ -35,6 +36,10 @@ set(rbd_srcs
   action/Status.cc
   action/Trash.cc
   action/Watch.cc)
+if(FREEBSD)
+  list(APPEND rbd_srcs action/Ggate.cc)
+endif()
+
 add_executable(rbd ${rbd_srcs}
   $<TARGET_OBJECTS:common_texttable_obj>)
 set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)

@@ -48,6 +48,8 @@ struct RGWUID
 WRITE_CLASS_ENCODER(RGWUID)
 
 extern int rgw_user_sync_all_stats(RGWRados *store, const rgw_user& user_id);
+extern int rgw_user_get_all_buckets_stats(RGWRados *store, const rgw_user& user_id, map<string, cls_user_bucket_entry>&buckets_usage_map);
+
 /**
  * Get the anonymous (ie, unauthenticated) user info.
  */
@@ -113,9 +115,6 @@ extern int rgw_get_user_attrs_by_uid(RGWRados *store,
  * Given an RGWUserInfo, deletes the user and its bucket ACLs.
  */
 extern int rgw_delete_user(RGWRados *store, RGWUserInfo& user, RGWObjVersionTracker& objv_tracker);
-/**
- * Store a list of the user's buckets, with associated functinos.
- */
 
 /*
  * remove the different indexes
@@ -125,13 +124,10 @@ extern int rgw_remove_uid_index(RGWRados *store, rgw_user& uid);
 extern int rgw_remove_email_index(RGWRados *store, string& email);
 extern int rgw_remove_swift_name_index(RGWRados *store, string& swift_name);
 
-/*
- * An RGWUser class along with supporting classes created
- * to support the creation of an RESTful administrative API
- */
-
 extern void rgw_perm_to_str(uint32_t mask, char *buf, int len);
 extern uint32_t rgw_str_to_perm(const char *str);
+
+extern int rgw_validate_tenant_name(const string& t);
 
 enum ObjectKeyType {
   KEY_TYPE_SWIFT,
@@ -151,6 +147,10 @@ enum RGWUserId {
   RGW_ACCESS_KEY,
 };
 
+/*
+ * An RGWUser class along with supporting classes created
+ * to support the creation of an RESTful administrative API
+ */
 struct RGWUserAdminOpState {
   // user attributes
   RGWUserInfo info;
@@ -163,6 +163,7 @@ struct RGWUserAdminOpState {
   __u8 system;
   __u8 exclusive;
   __u8 fetch_stats;
+  __u8 sync_stats;
   std::string caps;
   RGWObjVersionTracker objv;
   uint32_t op_mask;
@@ -199,7 +200,7 @@ struct RGWUserAdminOpState {
   bool op_mask_specified;
   bool caps_specified;
   bool suspension_op;
-  bool admin_specified;
+  bool admin_specified = false;
   bool system_specified;
   bool key_op;
   bool temp_url_key_specified;
@@ -248,10 +249,7 @@ struct RGWUserAdminOpState {
   }
 
   void set_user_email(std::string& email) {
-    if (email.empty())
-      return;
-
-    /* always lowercase email address */
+   /* always lowercase email address */
     boost::algorithm::to_lower(email);
     user_email = email;
     user_email_specified = true;
@@ -335,6 +333,10 @@ struct RGWUserAdminOpState {
 
   void set_fetch_stats(__u8 is_fetch_stats) {
     fetch_stats = is_fetch_stats;
+  }
+
+  void set_sync_stats(__u8 is_sync_stats) {
+    sync_stats = is_sync_stats;
   }
 
   void set_user_info(RGWUserInfo& user_info) {
@@ -462,8 +464,7 @@ struct RGWUserAdminOpState {
     int sub_buf_size = RAND_SUBUSER_LEN + 1;
     char sub_buf[RAND_SUBUSER_LEN + 1];
 
-    if (gen_rand_alphanumeric_upper(g_ceph_context, sub_buf, sub_buf_size) < 0)
-      return "";
+    gen_rand_alphanumeric_upper(g_ceph_context, sub_buf, sub_buf_size);
 
     rand_suffix = sub_buf;
     if (rand_suffix.empty())

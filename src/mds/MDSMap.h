@@ -73,7 +73,7 @@ extern CompatSet get_mdsmap_compat_set_base(); // pre v0.20
 #define MDS_FEATURE_INCOMPAT_OMAPDIRFRAG CompatSet::Feature(6, "dirfrag is stored in omap")
 #define MDS_FEATURE_INCOMPAT_INLINE CompatSet::Feature(7, "mds uses inline data")
 #define MDS_FEATURE_INCOMPAT_NOANCHOR CompatSet::Feature(8, "no anchor table")
-#define MDS_FEATURE_INCOMPAT_FILE_LAYOUT_V2 CompatSet::Feature(8, "file layout v2")
+#define MDS_FEATURE_INCOMPAT_FILE_LAYOUT_V2 CompatSet::Feature(9, "file layout v2")
 
 #define MDS_FS_NAME_DEFAULT "cephfs"
 
@@ -135,7 +135,7 @@ public:
     fs_cluster_id_t standby_for_fscid;
     bool standby_replay;
     std::set<mds_rank_t> export_targets;
-    uint64_t mds_features;
+    uint64_t mds_features = 0;
 
     mds_info_t() : global_id(MDS_GID_NONE), rank(MDS_RANK_NONE), inc(0),
                    state(STATE_STANDBY), state_seq(0),
@@ -156,6 +156,10 @@ public:
     void decode(bufferlist::iterator& p);
     void dump(Formatter *f) const;
     void print_summary(ostream &out) const;
+
+    // The long form name for use in cluster log messages`
+    std::string human_name() const;
+
     static void generate_test_instances(list<mds_info_t*>& ls);
   private:
     void encode_versioned(bufferlist& bl, uint64_t features) const;
@@ -226,12 +230,12 @@ public:
       flags(CEPH_MDSMAP_DEFAULTS), last_failure(0),
       last_failure_osd_epoch(0),
       tableserver(0), root(0),
-      session_timeout(0),
-      session_autoclose(0),
-      max_file_size(0),
+      session_timeout(60),
+      session_autoclose(300),
+      max_file_size(1ULL<<40), /* 1TB */
       cas_pool(-1),
       metadata_pool(-1),
-      max_mds(0),
+      max_mds(1),
       standby_count_wanted(-1),
       ever_allowed_features(0),
       explicitly_allowed_features(0),
@@ -245,6 +249,17 @@ public:
   utime_t get_session_timeout() const {
     return utime_t(session_timeout,0);
   }
+  void set_session_timeout(uint32_t t) {
+    session_timeout = t;
+  }
+
+  utime_t get_session_autoclose() const {
+    return utime_t(session_autoclose, 0);
+  }
+  void set_session_autoclose(uint32_t t) {
+    session_autoclose = t;
+  }
+
   uint64_t get_max_filesize() const { return max_file_size; }
   void set_max_filesize(uint64_t m) { max_file_size = m; }
   
@@ -447,12 +462,11 @@ public:
 	s.insert(p.second.rank);
   }
 
-  void
-  get_clientreplay_or_active_or_stopping_mds_set(std::set<mds_rank_t>& s) const {
+  void get_mds_set_lower_bound(std::set<mds_rank_t>& s, DaemonState first) const {
     for (std::map<mds_gid_t, mds_info_t>::const_iterator p = mds_info.begin();
 	 p != mds_info.end();
 	 ++p)
-      if (p->second.state >= STATE_CLIENTREPLAY && p->second.state <= STATE_STOPPING)
+      if (p->second.state >= first && p->second.state <= STATE_STOPPING)
 	s.insert(p->second.rank);
   }
   void get_mds_set(std::set<mds_rank_t>& s, DaemonState state) const {
@@ -656,7 +670,7 @@ public:
     bufferlist::iterator p = bl.begin();
     decode(p);
   }
-
+  void sanitize(const std::function<bool(int64_t pool)>& pool_exists);
 
   void print(ostream& out) const;
   void print_summary(Formatter *f, ostream *out) const;

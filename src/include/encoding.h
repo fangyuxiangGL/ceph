@@ -197,22 +197,6 @@ inline void encode(const char *s, bufferlist& bl)
 }
 
 
-// array
-template<class A>
-inline void encode_array_nohead(const A a[], int n, bufferlist &bl)
-{
-  for (int i=0; i<n; i++)
-    encode(a[i], bl);
-}
-template<class A>
-inline void decode_array_nohead(A a[], int n, bufferlist::iterator &p)
-{
-  for (int i=0; i<n; i++)
-    decode(a[i], p);
-}
-
-
-
 // -----------------------------
 // buffers
 
@@ -313,16 +297,16 @@ inline void encode(const boost::optional<T> &p, bufferlist &bl)
 #pragma GCC diagnostic ignored "-Wpragmas"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wuninitialized"
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 template<typename T>
 inline void decode(boost::optional<T> &p, bufferlist::iterator &bp)
 {
   __u8 present;
   ::decode(present, bp);
   if (present) {
-    T t;
-    p = t;
+    p = T{};
     decode(p.get(), bp);
+  } else {
+    p = boost::none;
   }
 }
 #pragma GCC diagnostic pop

@@ -18,7 +18,6 @@ const string reshard_oid_prefix = "reshard.";
 const string reshard_lock_name = "reshard_process";
 const string bucket_instance_lock_name = "bucket_instance_lock";
 
-using namespace std;
 
 #define RESHARD_SHARD_WINDOW 64
 #define RESHARD_MAX_AIO 128
@@ -475,11 +474,12 @@ int RGWBucketReshard::do_reshard(
   bucket_op.set_bucket_name(new_bucket_info.bucket.name);
   bucket_op.set_bucket_id(new_bucket_info.bucket.bucket_id);
   bucket_op.set_user_id(new_bucket_info.owner);
+  bucket_op.set_update_stats(false);
   string err;
-  int r = RGWBucketAdminOp::link(store, bucket_op, &err);
-  if (r < 0) {
-    lderr(store->ctx()) << "failed to link new bucket instance (bucket_id=" << new_bucket_info.bucket.bucket_id << ": " << err << "; " << cpp_strerror(-r) << ")" << dendl;
-    return -r;
+  ret = RGWBucketAdminOp::link(store, bucket_op, &err);
+  if (ret < 0) {
+    lderr(store->ctx()) << "failed to link new bucket instance (bucket_id=" << new_bucket_info.bucket.bucket_id << ": " << err << "; " << cpp_strerror(-ret) << ")" << dendl;
+    return -ret;
   }
 
   ret = bucket_info_updater.complete();
@@ -534,6 +534,7 @@ int RGWBucketReshard::execute(int num_shards, int max_op_entries,
   if (reshard_log) {
     ret = reshard_log->update(bucket_info, new_bucket_info);
     if (ret < 0) {
+      unlock_bucket();
       return ret;
     }
   }
@@ -587,13 +588,17 @@ void RGWReshard::get_bucket_logshard_oid(const string& tenant, const string& buc
   uint32_t sid = ceph_str_hash_linux(key.c_str(), key.size());
   uint32_t sid2 = sid ^ ((sid & 0xFF) << 24);
   sid = sid2 % MAX_RESHARD_LOGSHARDS_PRIME % num_logshards;
-  int logshard = sid % num_logshards;
 
-  get_logshard_oid(logshard, oid);
+  get_logshard_oid(int(sid), oid);
 }
 
 int RGWReshard::add(cls_rgw_reshard_entry& entry)
 {
+  if (!store->can_reshard()) {
+    ldout(store->ctx(), 20) << __func__ << " Resharding is disabled"  << dendl;
+    return 0;
+  }
+
   string logshard_oid;
 
   get_bucket_logshard_oid(entry.tenant, entry.bucket_name, &logshard_oid);
@@ -614,6 +619,7 @@ int RGWReshard::update(const RGWBucketInfo& bucket_info, const RGWBucketInfo& ne
   cls_rgw_reshard_entry entry;
   entry.bucket_name = bucket_info.bucket.name;
   entry.bucket_id = bucket_info.bucket.bucket_id;
+  entry.tenant = bucket_info.owner.tenant;
 
   int ret = get(entry);
   if (ret < 0) {
@@ -639,14 +645,20 @@ int RGWReshard::list(int logshard_num, string& marker, uint32_t max, std::list<c
   get_logshard_oid(logshard_num, &logshard_oid);
 
   int ret = cls_rgw_reshard_list(store->reshard_pool_ctx, logshard_oid, marker, max, entries, is_truncated);
-  if (ret < 0 && ret != -ENOENT) {
+
+  if (ret < 0) {
+    if (ret == -ENOENT) {
+      *is_truncated = false;
+      ret = 0;
+    }
     lderr(store->ctx()) << "ERROR: failed to list reshard log entries, oid=" << logshard_oid << dendl;
-    return ret;
+    if (ret == -EACCES) {
+      lderr(store->ctx()) << "access denied to pool " << store->get_zone_params().reshard_pool
+                          << ". Fix the pool access permissions of your client" << dendl;
+    }
   }
-  if (ret == -ENOENT) {
-    *is_truncated = false;
-  }
-  return 0;
+
+  return ret;
 }
 
 int RGWReshard::get(cls_rgw_reshard_entry& entry)
@@ -849,6 +861,10 @@ void  RGWReshard::get_logshard_oid(int shard_num, string *logshard)
 
 int RGWReshard::process_all_logshards()
 {
+  if (!store->can_reshard()) {
+    ldout(store->ctx(), 20) << __func__ << " Resharding is disabled"  << dendl;
+    return 0;
+  }
   int ret = 0;
 
   for (int i = 0; i < num_logshards; i++) {
@@ -892,14 +908,11 @@ void *RGWReshard::ReshardWorker::entry() {
   utime_t last_run;
   do {
     utime_t start = ceph_clock_now();
-    ldout(cct, 2) << "object expiration: start" << dendl;
     if (reshard->process_all_logshards()) {
       /* All shards have been processed properly. Next time we can start
        * from this moment. */
       last_run = start;
     }
-    ldout(cct, 2) << "object expiration: stop" << dendl;
-
 
     if (reshard->going_down())
       break;

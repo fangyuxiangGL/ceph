@@ -122,8 +122,8 @@ TEST_P(ParameterTest, parameter_all)
 	}
       }
 
-      result = shec->minimum_to_decode(want_to_decode, available_chunks,
-				       &minimum_chunks);
+      result = shec->_minimum_to_decode(want_to_decode, available_chunks,
+					&minimum_chunks);
 
       if (result == 0){
 	EXPECT_EQ(0, result);
@@ -194,8 +194,8 @@ TEST_P(ParameterTest, parameter_all)
     want_to_decode2[i] = i;
   }
 
-  result = shec->decode(set<int>(want_to_decode2, want_to_decode2 + 2),
-			encoded, &decoded);
+  result = shec->_decode(set<int>(want_to_decode2, want_to_decode2 + 2),
+			 encoded, &decoded);
   EXPECT_EQ(0, result);
   EXPECT_EQ(2u, decoded.size());
   EXPECT_EQ(c_size, decoded[0].length());
@@ -300,7 +300,7 @@ int main(int argc, char **argv)
 
   const char* env = getenv("CEPH_LIB");
   string directory(env ? env : ".libs");
-  g_conf->set_val("erasure_code_dir", directory, false);
+  g_conf->set_val_or_die("erasure_code_dir", directory, false);
 
   ::testing::InitGoogleTest(&argc, argv);
 

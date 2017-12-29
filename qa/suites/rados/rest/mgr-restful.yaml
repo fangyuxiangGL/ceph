@@ -5,13 +5,21 @@ tasks:
 - ceph:
     log-whitelist:
       - overall HEALTH_
-      - (MGR_DOWN)
+      - \(MGR_DOWN\)
+      - \(PG_
+      - \(OSD_
+      - \(OBJECT_
 - exec:
     mon.a:
-      - ceph tell mgr.x restful create-key admin
-      - ceph tell mgr.x restful create-self-signed-cert
-- ceph.restart: [mgr.x]
+      - ceph restful create-key admin
+      - ceph restful create-self-signed-cert
+      - ceph restful restart
 - workunit:
     clients:
       client.a:
         - rest/test-restful.sh
+- exec:
+    mon.a:
+      - ceph restful delete-key admin
+      - ceph restful list-keys | jq ".admin" | grep null
+

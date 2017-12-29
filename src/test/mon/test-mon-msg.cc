@@ -63,6 +63,7 @@ public:
   explicit MonClientHelper(CephContext *cct_)
     : Dispatcher(cct_),
       cct(cct_),
+      msg(NULL),
       monc(cct_),
       lock("mon-msg-test::lock")
   { }
@@ -218,7 +219,7 @@ class MonMsgTest : public MonClientHelper,
                    public ::testing::Test
 {
 protected:
-  int reply_type;
+  int reply_type = 0;
   Message *reply_msg = nullptr;
   Mutex lock;
   Cond cond;

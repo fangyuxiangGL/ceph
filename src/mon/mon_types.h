@@ -23,23 +23,21 @@
 #include "common/bit_str.h"
 #include "include/Context.h"
 
-#define PAXOS_PGMAP      0  // before osd, for pg kick to behave
-#define PAXOS_MDSMAP     1
-#define PAXOS_OSDMAP     2
-#define PAXOS_LOG        3
-#define PAXOS_MONMAP     4
-#define PAXOS_AUTH       5
-#define PAXOS_MGR        6
-#define PAXOS_MGRSTAT    7
-#define PAXOS_HEALTH    8
-#define PAXOS_NUM        9
+#define PAXOS_MDSMAP     0
+#define PAXOS_OSDMAP     1
+#define PAXOS_LOG        2
+#define PAXOS_MONMAP     3
+#define PAXOS_AUTH       4
+#define PAXOS_MGR        5
+#define PAXOS_MGRSTAT    6
+#define PAXOS_HEALTH     7
+#define PAXOS_NUM        8
 
 inline const char *get_paxos_name(int p) {
   switch (p) {
   case PAXOS_MDSMAP: return "mdsmap";
   case PAXOS_MONMAP: return "monmap";
   case PAXOS_OSDMAP: return "osdmap";
-  case PAXOS_PGMAP: return "pgmap";
   case PAXOS_LOG: return "logm";
   case PAXOS_AUTH: return "auth";
   case PAXOS_MGR: return "mgr";
@@ -56,10 +54,20 @@ struct FeatureMap {
   std::map<uint32_t,std::map<uint64_t,uint64_t>> m;
 
   void add(uint32_t type, uint64_t features) {
+    if (type == CEPH_ENTITY_TYPE_MON) {
+      return;
+    }
     m[type][features]++;
   }
 
+  void add_mon(uint64_t features) {
+    m[CEPH_ENTITY_TYPE_MON][features]++;
+  }
+
   void rm(uint32_t type, uint64_t features) {
+    if (type == CEPH_ENTITY_TYPE_MON) {
+      return;
+    }
     auto p = m.find(type);
     assert(p != m.end());
     auto q = p->second.find(features);
@@ -99,7 +107,9 @@ struct FeatureMap {
       f->open_object_section(ceph_entity_type_name(p.first));
       for (auto& q : p.second) {
 	f->open_object_section("group");
-	f->dump_unsigned("features", q.first);
+        std::stringstream ss;
+        ss << "0x" << std::hex << q.first << std::dec;
+        f->dump_string("features", ss.str());
 	f->dump_string("release", ceph_release_name(
 			 ceph_release_from_features(q.first)));
 	f->dump_unsigned("num", q.second);
@@ -478,6 +488,7 @@ namespace ceph {
     namespace mon {
       constexpr mon_feature_t FEATURE_KRAKEN(     (1ULL << 0));
       constexpr mon_feature_t FEATURE_LUMINOUS(   (1ULL << 1));
+      constexpr mon_feature_t FEATURE_MIMIC(      (1ULL << 2));
 
       constexpr mon_feature_t FEATURE_RESERVED(   (1ULL << 63));
       constexpr mon_feature_t FEATURE_NONE(       (0ULL));
@@ -491,6 +502,7 @@ namespace ceph {
         return (
 	  FEATURE_KRAKEN |
 	  FEATURE_LUMINOUS |
+	  FEATURE_MIMIC |
 	  FEATURE_NONE
 	  );
       }
@@ -508,6 +520,7 @@ namespace ceph {
         return (
 	  FEATURE_KRAKEN |
 	  FEATURE_LUMINOUS |
+	  FEATURE_MIMIC |
 	  FEATURE_NONE
 	  );
       }
@@ -524,6 +537,8 @@ static inline const char *ceph::features::mon::get_feature_name(uint64_t b) {
     return "kraken";
   } else if (f == FEATURE_LUMINOUS) {
     return "luminous";
+  } else if (f == FEATURE_MIMIC) {
+    return "mimic";
   } else if (f == FEATURE_RESERVED) {
     return "reserved";
   }
@@ -537,6 +552,8 @@ mon_feature_t ceph::features::mon::get_feature_by_name(std::string n) {
     return FEATURE_KRAKEN;
   } else if (n == "luminous") {
     return FEATURE_LUMINOUS;
+  } else if (n == "mimic") {
+    return FEATURE_MIMIC;
   } else if (n == "reserved") {
     return FEATURE_RESERVED;
   }

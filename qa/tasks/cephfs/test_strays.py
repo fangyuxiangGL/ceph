@@ -544,8 +544,7 @@ class TestStrays(CephFSTestCase):
                     time.sleep(1)
 
     def _is_stopped(self, rank):
-        mds_map = self.fs.get_mds_map()
-        return rank not in [i['rank'] for i in mds_map['info'].values()]
+        return rank not in self.fs.get_mds_map()['up']
 
     def test_purge_on_shutdown(self):
         """
@@ -638,8 +637,8 @@ class TestStrays(CephFSTestCase):
                                mds_id=rank_1_id)
 
         # Shut down rank 1
-        self.fs.mon_manager.raw_cluster_cmd_result('mds', 'set', "max_mds", "1")
-        self.fs.mon_manager.raw_cluster_cmd_result('mds', 'deactivate', "1")
+        self.fs.set_max_mds(1)
+        self.fs.deactivate(1)
 
         # Wait til we get to a single active MDS mdsmap state
         self.wait_until_true(lambda: self._is_stopped(1), timeout=120)
@@ -744,8 +743,7 @@ class TestStrays(CephFSTestCase):
         in purging on the stray for the file.
         """
         # Enable snapshots
-        self.fs.mon_manager.raw_cluster_cmd("mds", "set", "allow_new_snaps", "true",
-                                            "--yes-i-really-mean-it")
+        self.fs.set_allow_new_snaps(True)
 
         # Create a dir with a file in it
         size_mb = 8
@@ -785,18 +783,23 @@ class TestStrays(CephFSTestCase):
 
         # Remove the snapshot
         self.mount_a.run_shell(["rmdir", "snapdir/.snap/snap1"])
-        self.mount_a.umount_wait()
 
         # Purging file_a doesn't happen until after we've flushed the journal, because
         # it is referenced by the snapshotted subdir, and the snapshot isn't really
         # gone until the journal references to it are gone
         self.fs.mds_asok(["flush", "journal"])
 
+        # Wait for purging to complete, which requires the OSDMap to propagate to the OSDs.
+        # See also: http://tracker.ceph.com/issues/20072
+        self.wait_until_true(
+            lambda: self.fs.data_objects_absent(file_a_ino, size_mb * 1024 * 1024),
+            timeout=60
+        )
+
         # See that a purge happens now
         self._wait_for_counter("mds_cache", "strays_enqueued", 2)
         self._wait_for_counter("purge_queue", "pq_executed", 2)
 
-        self.assertTrue(self.fs.data_objects_absent(file_a_ino, size_mb * 1024 * 1024))
         self.await_data_pool_empty()
 
     def test_fancy_layout(self):
@@ -958,7 +961,7 @@ class TestStrays(CephFSTestCase):
 
         max_purge_files = 2
 
-        self.set_conf('mds', 'mds_bal_frag', 'false')
+        self.fs.set_allow_dirfrags(True)
         self.set_conf('mds', 'mds_max_purge_files', "%d" % max_purge_files)
         self.fs.mds_fail_restart()
         self.fs.wait_for_daemons()

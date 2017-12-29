@@ -1,4 +1,5 @@
-#!/bin/bash -ex
+#!/usr/bin/env bash
+set -ex
 
 STACK_BRANCH=stable/ocata
 
@@ -87,7 +88,8 @@ enable_plugin devstack-plugin-ceph git://git.openstack.org/openstack/devstack-pl
 EOF
 
 cat<<EOF > ${STACK_HOME_PATH}/start.sh
-#!/bin/bash -ex
+#!/usr/bin/env bash
+set -ex
 cd ${STACK_OPT_PATH}
 git clone https://git.openstack.org/openstack-dev/devstack -b ${STACK_BRANCH}
 
@@ -107,6 +109,11 @@ EOF
 # execute devstack
 chmod 0755 ${STACK_HOME_PATH}/start.sh
 sudo -H -u ${STACK_USER} ${STACK_HOME_PATH}/start.sh
+
+# switch to rbd profile caps
+ceph auth caps client.cinder mon 'profile rbd' osd 'profile rbd pool=volumes, profile rbd pool=vms, profile rbd pool=images'
+ceph auth caps client.cinder-bak mon 'profile rbd' osd 'profile rbd pool=backups, profile rbd pool=volumes'
+ceph auth caps client.glance mon 'profile rbd' osd 'profile rbd pool=images'
 
 # execute tempest
 chown -R ${TEMPEST_USER}:${STACK_GROUP} ${STACK_OPT_PATH}/tempest

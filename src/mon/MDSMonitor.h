@@ -20,7 +20,6 @@
 
 #include <map>
 #include <set>
-using namespace std;
 
 #include "include/types.h"
 #include "mds/FSMap.h"
@@ -34,21 +33,20 @@ class MMDSLoadTargets;
 class MMDSMap;
 class FileSystemCommandHandler;
 
-#define MDS_HEALTH_PREFIX "mds_health"
-
 class MDSMonitor : public PaxosService {
  public:
   MDSMonitor(Monitor *mn, Paxos *p, string service_name);
 
   // service methods
   void create_initial() override;
+  void get_store_prefixes(std::set<string>& s) const override;
   void update_from_paxos(bool *need_bootstrap) override;
   void init() override;
   void create_pending() override; 
   void encode_pending(MonitorDBStore::TransactionRef t) override;
   // we don't require full versions; don't encode any.
   void encode_full(MonitorDBStore::TransactionRef t) override { }
-  version_t get_trim_to() override;
+  version_t get_trim_to() const override;
 
   bool preprocess_query(MonOpRequestRef op) override;  // true if processed.
   bool prepare_update(MonOpRequestRef op) override;
@@ -76,7 +74,6 @@ class MDSMonitor : public PaxosService {
 
   // my helpers
   void print_map(FSMap &m, int dbl=7);
-  void update_logger();
 
   void _updated(MonOpRequestRef op);
 
@@ -87,10 +84,8 @@ class MDSMonitor : public PaxosService {
   bool preprocess_offload_targets(MonOpRequestRef op);
   bool prepare_offload_targets(MonOpRequestRef op);
 
-  void get_health(list<pair<health_status_t,string> >& summary,
-		  list<pair<health_status_t,string> > *detail,
-		  CephContext *cct) const override;
-  int fail_mds(std::ostream &ss, const std::string &arg);
+  int fail_mds(std::ostream &ss, const std::string &arg,
+      MDSMap::mds_info_t *failed_info);
 
   bool preprocess_command(MonOpRequestRef op);
   bool prepare_command(MonOpRequestRef op);
@@ -100,13 +95,6 @@ class MDSMonitor : public PaxosService {
       mds_role_t *role,
       std::ostream &ss);
 
-  void modify_legacy_filesystem(
-      std::function<void(std::shared_ptr<Filesystem> )> fn);
-  int legacy_filesystem_command(
-      MonOpRequestRef op,
-      std::string const &prefix,
-      map<string, cmd_vartype> &cmdmap,
-      std::stringstream &ss);
   int filesystem_command(
       MonOpRequestRef op,
       std::string const &prefix,
@@ -129,7 +117,7 @@ class MDSMonitor : public PaxosService {
 
   bool maybe_promote_standby(std::shared_ptr<Filesystem> fs);
   bool maybe_expand_cluster(std::shared_ptr<Filesystem> fs);
-  void maybe_replace_gid(mds_gid_t gid, const beacon_info_t &beacon,
+  void maybe_replace_gid(mds_gid_t gid, const MDSMap::mds_info_t& info,
       bool *mds_propose, bool *osd_propose);
   void tick() override;     // check state, take actions
 
@@ -139,10 +127,14 @@ class MDSMonitor : public PaxosService {
   void remove_from_metadata(MonitorDBStore::TransactionRef t);
   int load_metadata(map<mds_gid_t, Metadata>& m);
   void count_metadata(const string& field, Formatter *f);
+public:
+  void count_metadata(const string& field, map<string,int> *out);
+protected:
 
   // MDS daemon GID to latest health state from that GID
   std::map<uint64_t, MDSHealth> pending_daemon_health;
   std::set<uint64_t> pending_daemon_health_rm;
+
 
   map<mds_gid_t, Metadata> pending_metadata;
 

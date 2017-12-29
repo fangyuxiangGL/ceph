@@ -27,11 +27,11 @@
 #include <vector>
 #include <map>
 
-#if defined(DARWIN) || defined(__FreeBSD__) || defined(__sun)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__sun)
 #include <sys/statvfs.h>
 #else
 #include <sys/vfs.h>    /* or <sys/statfs.h> */
-#endif /* DARWIN */
+#endif
 
 #define OPS_PER_PTR 32
 
@@ -330,7 +330,7 @@ public:
    *
    * TRANSACTION ISOLATION
    *
-   * Except as noted below, isolation is the responsibility of the
+   * Except as noted above, isolation is the responsibility of the
    * caller. In other words, if any storage element (storage element
    * == any of the four portions of an object as described above) is
    * altered by a transaction (including deletion), the caller
@@ -383,8 +383,6 @@ public:
       OP_COLL_RMATTR =  25,  // cid, attrname
       OP_COLL_SETATTRS = 26,  // cid, attrset
       OP_COLL_MOVE =    8,   // newcid, oldcid, oid
-
-      OP_STARTSYNC =    27,  // start a sync
 
       OP_RMATTRS =      28,  // cid, oid
       OP_COLL_RENAME =       29,  // cid, newcid
@@ -589,16 +587,29 @@ public:
       assert(out_on_commit);
       assert(out_on_applied_sync);
       list<Context *> on_applied, on_commit, on_applied_sync;
-      for (vector<Transaction>::iterator i = t.begin();
-	   i != t.end();
-	   ++i) {
-	on_applied.splice(on_applied.end(), (*i).on_applied);
-	on_commit.splice(on_commit.end(), (*i).on_commit);
-	on_applied_sync.splice(on_applied_sync.end(), (*i).on_applied_sync);
+      for (auto& i : t) {
+	on_applied.splice(on_applied.end(), i.on_applied);
+	on_commit.splice(on_commit.end(), i.on_commit);
+	on_applied_sync.splice(on_applied_sync.end(), i.on_applied_sync);
       }
       *out_on_applied = C_Contexts::list_to_context(on_applied);
       *out_on_commit = C_Contexts::list_to_context(on_commit);
       *out_on_applied_sync = C_Contexts::list_to_context(on_applied_sync);
+    }
+    static void collect_contexts(
+      vector<Transaction>& t,
+      list<Context*> *out_on_applied,
+      list<Context*> *out_on_commit,
+      list<Context*> *out_on_applied_sync) {
+      assert(out_on_applied);
+      assert(out_on_commit);
+      assert(out_on_applied_sync);
+      for (auto& i : t) {
+	out_on_applied->splice(out_on_applied->end(), i.on_applied);
+	out_on_commit->splice(out_on_commit->end(), i.on_commit);
+	out_on_applied_sync->splice(out_on_applied_sync->end(),
+				    i.on_applied_sync);
+      }
     }
 
     Context *get_on_applied() {
@@ -639,7 +650,6 @@ public:
 
       switch (op->op) {
       case OP_NOP:
-      case OP_STARTSYNC:
         break;
 
       case OP_TOUCH:
@@ -722,7 +732,7 @@ public:
         break;
 
       default:
-        assert(0 == "Unkown OP");
+        assert(0 == "Unknown OP");
       }
     }
     void _update_op_bl(
@@ -856,7 +866,7 @@ public:
     /// offset of buffer as aligned to destination within object.
     int get_data_alignment() {
       if (!data.largest_data_len)
-	return -1;
+	return 0;
       return (0 - get_data_offset()) & ~CEPH_PAGE_MASK;
     }
     /// Is the Transaction empty (no operations)
@@ -1026,12 +1036,6 @@ private:
     }
 
 public:
-    /// Commence a global file system sync operation.
-    void start_sync() {
-      Op* _op = _get_next_op();
-      _op->op = OP_STARTSYNC;
-      data.ops++;
-    }
     /// noop. 'nuf said
     void nop() {
       Op* _op = _get_next_op();
@@ -1060,6 +1064,8 @@ public:
      * newly provided data. More sophisticated implementations of
      * ObjectStore will omit the untouched data and store it as a
      * "hole" in the file.
+     *
+     * Note that a 0-length write does not affect the size of the object.
      */
     void write(const coll_t& cid, const ghobject_t& oid, uint64_t off, uint64_t len,
 	       const bufferlist& write_data, uint32_t flags = 0) {
@@ -1085,6 +1091,11 @@ public:
      * zero out the indicated byte range within an object. Some
      * ObjectStore instances may optimize this to release the
      * underlying storage space.
+     *
+     * If the zero range extends beyond the end of the object, the object
+     * size is extended, just as if we were writing a buffer full of zeros.
+     * EXCEPT if the length is 0, in which case (just like a 0-length write)
+     * we do not adjust the object size.
      */
     void zero(const coll_t& cid, const ghobject_t& oid, uint64_t off, uint64_t len) {
       Op* _op = _get_next_op();
@@ -1543,6 +1554,9 @@ public:
   virtual int fsck(bool deep) {
     return -EOPNOTSUPP;
   }
+  virtual int repair(bool deep) {
+    return -EOPNOTSUPP;
+  }
 
   virtual void set_cache_shards(unsigned num) { }
 
@@ -1561,6 +1575,16 @@ public:
   virtual bool wants_journal() = 0;  //< prefers a journal
   virtual bool allows_journal() = 0; //< allows a journal
 
+  /// enumerate hardware devices (by 'devname', e.g., 'sda' as in /sys/block/sda)
+  virtual int get_devices(std::set<string> *devls) {
+    return -EOPNOTSUPP;
+  }
+
+  /// true if a txn is readable immediately after it is queued.
+  virtual bool is_sync_onreadable() const {
+    return true;
+  }
+
   /**
    * is_rotational
    *
@@ -1572,6 +1596,19 @@ public:
    * @return true for HDD, false for SSD
    */
   virtual bool is_rotational() {
+    return true;
+  }
+
+  /**
+   * is_journal_rotational
+   *
+   * Check whether journal is backed by a rotational (HDD) or non-rotational
+   * (SSD) device.
+   *
+   *
+   * @return true for HDD, false for SSD
+   */
+  virtual bool is_journal_rotational() {
     return true;
   }
 
@@ -1697,7 +1734,6 @@ public:
    * @param len number of bytes to be read
    * @param bl output bufferlist
    * @param op_flags is CEPH_OSD_OP_FLAG_*
-   * @param allow_eio if false, assert on -EIO operation failure
    * @returns number of bytes read on success, or negative error code on failure.
    */
    virtual int read(
@@ -2026,6 +2062,9 @@ public:
   virtual void inject_mdata_error(const ghobject_t &oid) {}
 
   virtual void compact() {}
+  virtual bool has_builtin_csum() const {
+    return false;
+  }
 };
 WRITE_CLASS_ENCODER(ObjectStore::Transaction)
 WRITE_CLASS_ENCODER(ObjectStore::Transaction::TransactionData)

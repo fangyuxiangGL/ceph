@@ -19,8 +19,6 @@
 #ifndef CEPH_OSDMAP_H
 #define CEPH_OSDMAP_H
 
-#include "include/cpp-btree/btree_map.h"
-
 /*
  * describe properties of the OSD cluster.
  *   disks, disk groups, total # osds,
@@ -36,24 +34,12 @@
 #include <set>
 #include <map>
 #include "include/memory.h"
-using namespace std;
+#include "include/btree_map.h"
 
 // forward declaration
 class CephContext;
 class CrushWrapper;
 class health_check_map_t;
-
-// FIXME C++11 does not have std::equal for two differently-typed containers.
-// use this until we move to c++14
-template<typename A, typename B>
-bool vectors_equal(A a, B b)
-{
-  return
-    a.size() == b.size() &&
-    (a.empty() ||
-     memcmp((char*)&a[0], (char*)&b[0], sizeof(a[0]) * a.size()) == 0);
-}
-
 
 /*
  * we track up to two intervals during which the osd was alive and
@@ -357,6 +343,10 @@ class OSDMap {
 public:
   MEMPOOL_CLASS_HELPERS();
 
+  typedef interval_set<
+    snapid_t,
+    mempool::osdmap::flat_map<snapid_t,snapid_t>> snap_interval_set_t;
+
   class Incremental {
   public:
     MEMPOOL_CLASS_HELPERS();
@@ -403,6 +393,8 @@ public:
     mempool::osdmap::map<pg_t,mempool::osdmap::vector<int32_t>> new_pg_upmap;
     mempool::osdmap::map<pg_t,mempool::osdmap::vector<pair<int32_t,int32_t>>> new_pg_upmap_items;
     mempool::osdmap::set<pg_t> old_pg_upmap, old_pg_upmap_items;
+    mempool::osdmap::map<int64_t, snap_interval_set_t> new_removed_snaps;
+    mempool::osdmap::map<int64_t, snap_interval_set_t> new_purged_snaps;
 
     string cluster_snapshot;
 
@@ -537,6 +529,15 @@ private:
 
   mempool::osdmap::unordered_map<entity_addr_t,utime_t> blacklist;
 
+  /// queue of snaps to remove
+  mempool::osdmap::map<int64_t, snap_interval_set_t> removed_snaps_queue;
+
+  /// removed_snaps additions this epoch
+  mempool::osdmap::map<int64_t, snap_interval_set_t> new_removed_snaps;
+
+  /// removed_snaps removals this epoch
+  mempool::osdmap::map<int64_t, snap_interval_set_t> new_purged_snaps;
+
   epoch_t cluster_snapshot_epoch;
   string cluster_snapshot;
   bool new_blacklist_entries;
@@ -586,7 +587,6 @@ private:
     memset(&fsid, 0, sizeof(fsid));
   }
 
-  // no copying
 private:
   OSDMap(const OSDMap& other) = default;
   OSDMap& operator=(const OSDMap& other) = default;
@@ -644,13 +644,10 @@ public:
   float get_nearfull_ratio() const {
     return nearfull_ratio;
   }
-  void count_full_nearfull_osds(int *full, int *backfill, int *nearfull) const;
-  void get_full_osd_util(
-    const mempool::pgmap::unordered_map<int32_t,osd_stat_t> &osd_stat,
-    map<int, float> *full,
-    map<int, float> *backfill,
-    map<int, float> *nearfull) const;
-
+  void get_full_pools(CephContext *cct,
+                      set<int64_t> *full,
+                      set<int64_t> *backfillfull,
+                      set<int64_t> *nearfull) const;
   void get_full_osd_counts(set<int> *full, set<int> *backfill,
 			   set<int> *nearfull) const;
 
@@ -683,6 +680,8 @@ public:
   bool test_flag(int f) const { return flags & f; }
   void set_flag(int f) { flags |= f; }
   void clear_flag(int f) { flags &= ~f; }
+
+  void get_flag_set(set<string> *flagset) const;
 
   static void calc_state_set(int state, set<string>& st);
 
@@ -1132,14 +1131,14 @@ public:
   bool pg_is_ec(pg_t pg) const {
     auto i = pools.find(pg.pool());
     assert(i != pools.end());
-    return i->second.ec_pool();
+    return i->second.is_erasure();
   }
   bool get_primary_shard(const pg_t& pgid, spg_t *out) const {
     auto i = get_pools().find(pgid.pool());
     if (i == get_pools().end()) {
       return false;
     }
-    if (!i->second.ec_pool()) {
+    if (!i->second.is_erasure()) {
       *out = spg_t(pgid);
       return true;
     }
@@ -1153,6 +1152,19 @@ public:
       }
     }
     return false;
+  }
+
+  const mempool::osdmap::map<int64_t,snap_interval_set_t>&
+  get_removed_snaps_queue() const {
+    return removed_snaps_queue;
+  }
+  const mempool::osdmap::map<int64_t,snap_interval_set_t>&
+  get_new_removed_snaps() const {
+    return new_removed_snaps;
+  }
+  const mempool::osdmap::map<int64_t,snap_interval_set_t>&
+  get_new_purged_snaps() const {
+    return new_purged_snaps;
   }
 
   int64_t lookup_pg_pool_name(const string& name) const {
@@ -1171,10 +1183,24 @@ public:
   mempool::osdmap::map<int64_t,pg_pool_t>& get_pools() {
     return pools;
   }
+  void get_pool_ids_by_rule(int rule_id, set<int64_t> *pool_ids) const {
+    assert(pool_ids);
+    for (auto &p: pools) {
+      if (p.second.get_crush_rule() == rule_id) {
+        pool_ids->insert(p.first);
+      }
+    }
+  }
+  void get_pool_ids_by_osd(CephContext *cct,
+                           int osd,
+                           set<int64_t> *pool_ids) const;
   const string& get_pool_name(int64_t p) const {
     auto i = pool_name.find(p);
     assert(i != pool_name.end());
     return i->second;
+  }
+  const mempool::osdmap::map<int64_t,string>& get_pool_names() const {
+    return pool_name;
   }
   bool have_pg_pool(int64_t p) const {
     return pools.count(p);
@@ -1326,7 +1352,9 @@ public:
     const string& root,
     ostream *ss);
 
-  bool crush_ruleset_in_use(int ruleset) const;
+  bool crush_rule_in_use(int rule_id) const;
+
+  int validate_crush_rules(CrushWrapper *crush, ostream *ss) const;
 
   void clear_temp() {
     pg_temp->clear();
@@ -1342,10 +1370,11 @@ public:
   void print_oneline_summary(ostream& out) const;
 
   enum {
-    DUMP_IN = 1,     // only 'in' osds
-    DUMP_OUT = 2,    // only 'out' osds
-    DUMP_UP = 4,     // only 'up' osds
-    DUMP_DOWN = 8,   // only 'down' osds
+    DUMP_IN = 1,         // only 'in' osds
+    DUMP_OUT = 2,        // only 'out' osds
+    DUMP_UP = 4,         // only 'up' osds
+    DUMP_DOWN = 8,       // only 'down' osds
+    DUMP_DESTROYED = 16, // only 'destroyed' osds
   };
   void print_tree(Formatter *f, ostream *out, unsigned dump_flags=0) const;
 
@@ -1365,6 +1394,10 @@ public:
   bool check_new_blacklist_entries() const { return new_blacklist_entries; }
 
   void check_health(health_check_map_t *checks) const;
+
+  int parse_osd_id_list(const vector<string>& ls,
+			set<int> *out,
+			ostream *ss) const;
 };
 WRITE_CLASS_ENCODER_FEATURES(OSDMap)
 WRITE_CLASS_ENCODER_FEATURES(OSDMap::Incremental)
@@ -1376,10 +1409,10 @@ inline ostream& operator<<(ostream& out, const OSDMap& m) {
   return out;
 }
 
-class PGStatService;
+class PGMap;
 
 void print_osd_utilization(const OSDMap& osdmap,
-			   const PGStatService *pgstat,
+			   const PGMap& pgmap,
 			   ostream& out,
 			   Formatter *f,
 			   bool tree);

@@ -71,20 +71,18 @@ int ErasureCodeLrc::create_rule(const string &name,
     root = crush.class_bucket[root][c];
   }
 
-  int rule = 0;
   int rno = 0;
   for (rno = 0; rno < crush.get_max_rules(); rno++) {
     if (!crush.rule_exists(rno) && !crush.ruleset_exists(rno))
        break;
   }
-  rule = rno;
 
   int steps = 4 + rule_steps.size();
   int min_rep = 3;
   int max_rep = get_chunk_count();
   int ret;
-  ret = crush.add_rule(steps, rule, pg_pool_t::TYPE_ERASURE,
-		  min_rep, max_rep, rno);
+  ret = crush.add_rule(rno, steps, pg_pool_t::TYPE_ERASURE,
+		       min_rep, max_rep);
   assert(ret == rno);
   int step = 0;
 
@@ -112,7 +110,7 @@ int ErasureCodeLrc::create_rule(const string &name,
   ret = crush.set_rule_step(rno, step++, CRUSH_RULE_EMIT, 0, 0);
   assert(ret == 0);
   crush.set_rule_name(rno, name);
-  return rule;
+  return rno;
 }
 
 int ErasureCodeLrc::layers_description(const ErasureCodeProfile &profile,
@@ -571,9 +569,9 @@ unsigned int ErasureCodeLrc::get_chunk_size(unsigned int object_size) const
 
 void p(const set<int> &s) { cerr << s; } // for gdb
 
-int ErasureCodeLrc::minimum_to_decode(const set<int> &want_to_read,
-				      const set<int> &available_chunks,
-				      set<int> *minimum)
+int ErasureCodeLrc::_minimum_to_decode(const set<int> &want_to_read,
+				       const set<int> &available_chunks,
+				       set<int> *minimum)
 {
   dout(20) << __func__ << " want_to_read " << want_to_read
 	   << " available_chunks " << available_chunks << dendl;

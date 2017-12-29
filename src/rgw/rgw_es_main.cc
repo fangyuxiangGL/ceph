@@ -9,7 +9,6 @@
 #include "common/ceph_json.h"
 #include "rgw_es_query.h"
 
-using namespace std;
 
 int main(int argc, char *argv[])
 {
@@ -21,8 +20,6 @@ int main(int argc, char *argv[])
                          CODE_ENVIRONMENT_UTILITY, 0);
 
   common_init_finish(g_ceph_context);
-
-  list<string> infix;
 
   string expr;
 

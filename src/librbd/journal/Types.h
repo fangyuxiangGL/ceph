@@ -10,11 +10,13 @@
 #include "include/encoding.h"
 #include "include/types.h"
 #include "include/utime.h"
+#include "librbd/Types.h"
 #include <iosfwd>
 #include <list>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/variant.hpp>
+#include <boost/mpl/vector.hpp>
 
 namespace ceph {
 class Formatter;
@@ -24,25 +26,26 @@ namespace librbd {
 namespace journal {
 
 enum EventType {
-  EVENT_TYPE_AIO_DISCARD     = 0,
-  EVENT_TYPE_AIO_WRITE       = 1,
-  EVENT_TYPE_AIO_FLUSH       = 2,
-  EVENT_TYPE_OP_FINISH       = 3,
-  EVENT_TYPE_SNAP_CREATE     = 4,
-  EVENT_TYPE_SNAP_REMOVE     = 5,
-  EVENT_TYPE_SNAP_RENAME     = 6,
-  EVENT_TYPE_SNAP_PROTECT    = 7,
-  EVENT_TYPE_SNAP_UNPROTECT  = 8,
-  EVENT_TYPE_SNAP_ROLLBACK   = 9,
-  EVENT_TYPE_RENAME          = 10,
-  EVENT_TYPE_RESIZE          = 11,
-  EVENT_TYPE_FLATTEN         = 12,
-  EVENT_TYPE_DEMOTE_PROMOTE  = 13,
-  EVENT_TYPE_SNAP_LIMIT      = 14,
-  EVENT_TYPE_UPDATE_FEATURES = 15,
-  EVENT_TYPE_METADATA_SET    = 16,
-  EVENT_TYPE_METADATA_REMOVE = 17,
-  EVENT_TYPE_AIO_WRITESAME   = 18,
+  EVENT_TYPE_AIO_DISCARD           = 0,
+  EVENT_TYPE_AIO_WRITE             = 1,
+  EVENT_TYPE_AIO_FLUSH             = 2,
+  EVENT_TYPE_OP_FINISH             = 3,
+  EVENT_TYPE_SNAP_CREATE           = 4,
+  EVENT_TYPE_SNAP_REMOVE           = 5,
+  EVENT_TYPE_SNAP_RENAME           = 6,
+  EVENT_TYPE_SNAP_PROTECT          = 7,
+  EVENT_TYPE_SNAP_UNPROTECT        = 8,
+  EVENT_TYPE_SNAP_ROLLBACK         = 9,
+  EVENT_TYPE_RENAME                = 10,
+  EVENT_TYPE_RESIZE                = 11,
+  EVENT_TYPE_FLATTEN               = 12,
+  EVENT_TYPE_DEMOTE_PROMOTE        = 13,
+  EVENT_TYPE_SNAP_LIMIT            = 14,
+  EVENT_TYPE_UPDATE_FEATURES       = 15,
+  EVENT_TYPE_METADATA_SET          = 16,
+  EVENT_TYPE_METADATA_REMOVE       = 17,
+  EVENT_TYPE_AIO_WRITESAME         = 18,
+  EVENT_TYPE_AIO_COMPARE_AND_WRITE = 19,
 };
 
 struct AioDiscardEvent {
@@ -95,6 +98,28 @@ struct AioWriteSameEvent {
   AioWriteSameEvent(uint64_t _offset, uint64_t _length,
                     const bufferlist &_data)
     : offset(_offset), length(_length), data(_data) {
+  }
+
+  void encode(bufferlist& bl) const;
+  void decode(__u8 version, bufferlist::iterator& it);
+  void dump(Formatter *f) const;
+};
+
+struct AioCompareAndWriteEvent {
+  static const EventType TYPE = EVENT_TYPE_AIO_COMPARE_AND_WRITE;
+
+  uint64_t offset;
+  uint64_t length;
+  bufferlist cmp_data;
+  bufferlist write_data;
+
+  static uint32_t get_fixed_size();
+
+  AioCompareAndWriteEvent() : offset(0), length(0) {
+  }
+  AioCompareAndWriteEvent(uint64_t _offset, uint64_t _length,
+                          const bufferlist &_cmp_data, const bufferlist &_write_data)
+    : offset(_offset), length(_length), cmp_data(_cmp_data), write_data(_write_data) {
   }
 
   void encode(bufferlist& bl) const;
@@ -383,26 +408,28 @@ struct UnknownEvent {
   void dump(Formatter *f) const;
 };
 
-typedef boost::variant<AioDiscardEvent,
-                       AioWriteEvent,
-                       AioFlushEvent,
-                       OpFinishEvent,
-                       SnapCreateEvent,
-                       SnapRemoveEvent,
-                       SnapRenameEvent,
-                       SnapProtectEvent,
-                       SnapUnprotectEvent,
-                       SnapRollbackEvent,
-                       RenameEvent,
-                       ResizeEvent,
-                       FlattenEvent,
-                       DemotePromoteEvent,
-		       SnapLimitEvent,
-                       UpdateFeaturesEvent,
-                       MetadataSetEvent,
-                       MetadataRemoveEvent,
-                       AioWriteSameEvent,
-                       UnknownEvent> Event;
+typedef boost::mpl::vector<AioDiscardEvent,
+                           AioWriteEvent,
+                           AioFlushEvent,
+                           OpFinishEvent,
+                           SnapCreateEvent,
+                           SnapRemoveEvent,
+                           SnapRenameEvent,
+                           SnapProtectEvent,
+                           SnapUnprotectEvent,
+                           SnapRollbackEvent,
+                           RenameEvent,
+                           ResizeEvent,
+                           FlattenEvent,
+                           DemotePromoteEvent,
+                           SnapLimitEvent,
+                           UpdateFeaturesEvent,
+                           MetadataSetEvent,
+                           MetadataRemoveEvent,
+                           AioWriteSameEvent,
+                           AioCompareAndWriteEvent,
+                           UnknownEvent> EventVector;
+typedef boost::make_variant_over<EventVector>::type Event;
 
 struct EventEntry {
   static uint32_t get_fixed_size() {
@@ -500,7 +527,6 @@ enum MirrorPeerState {
 
 struct MirrorPeerClientMeta {
   typedef std::list<MirrorPeerSyncPoint> SyncPoints;
-  typedef std::map<uint64_t, uint64_t> SnapSeqs;
 
   static const ClientMetaType TYPE = MIRROR_PEER_CLIENT_META_TYPE;
 

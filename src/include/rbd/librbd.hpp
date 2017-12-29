@@ -101,6 +101,19 @@ namespace librbd {
     time_t deferment_end_time;
   } trash_image_info_t;
 
+  typedef struct {
+    std::string pool_name;
+    std::string image_name;
+    std::string image_id;
+    bool trash;
+  } child_info_t;
+
+  typedef struct {
+    std::string addr;
+    int64_t id;
+    uint64_t cookie;
+  } image_watcher_t;
+
 class CEPH_RBD_API RBD
 {
 public:
@@ -293,6 +306,11 @@ public:
 			  ImageOptions& opts, ProgressContext &prog_ctx,
 			  size_t sparse_size);
 
+  /* deep copy */
+  int deep_copy(IoCtx& dest_io_ctx, const char *destname, ImageOptions& opts);
+  int deep_copy_with_progress(IoCtx& dest_io_ctx, const char *destname,
+                              ImageOptions& opts, ProgressContext &prog_ctx);
+
   /* striping */
   uint64_t get_stripe_unit() const;
   uint64_t get_stripe_count() const;
@@ -306,6 +324,11 @@ public:
    * of this image at the currently set snapshot.
    */
   int list_children(std::set<std::pair<std::string, std::string> > *children);
+  /**
+  * Returns a structure of poolname, imagename, imageid and trash flag
+  * for each clone of this image at the currently set snapshot.
+  */
+  int list_children2(std::vector<librbd::child_info_t> *children);
 
   /* advisory locking (see librbd.h for details) */
   int list_lockers(std::list<locker_t> *lockers,
@@ -376,6 +399,8 @@ public:
   ssize_t write2(uint64_t ofs, size_t len, ceph::bufferlist& bl, int op_flags);
   int discard(uint64_t ofs, uint64_t len);
   ssize_t writesame(uint64_t ofs, size_t len, ceph::bufferlist &bl, int op_flags);
+  ssize_t compare_and_write(uint64_t ofs, size_t len, ceph::bufferlist &cmp_bl,
+                            ceph::bufferlist& bl, uint64_t *mismatch_off, int op_flags);
 
   int aio_write(uint64_t off, size_t len, ceph::bufferlist& bl, RBD::AioCompletion *c);
   /* @param op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
@@ -383,6 +408,9 @@ public:
 		  RBD::AioCompletion *c, int op_flags);
   int aio_writesame(uint64_t off, size_t len, ceph::bufferlist& bl,
                     RBD::AioCompletion *c, int op_flags);
+  int aio_compare_and_write(uint64_t off, size_t len, ceph::bufferlist& cmp_bl,
+                            ceph::bufferlist& bl, RBD::AioCompletion *c,
+                            uint64_t *mismatch_off, int op_flags);
   /**
    * read async from image
    *
@@ -453,6 +481,8 @@ public:
 
   int update_watch(UpdateWatchCtx *ctx, uint64_t *handle);
   int update_unwatch(uint64_t handle);
+
+  int list_watchers(std::list<image_watcher_t> &watchers);
 
 private:
   friend class RBD;

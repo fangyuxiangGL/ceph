@@ -20,10 +20,15 @@
 #include <limits.h>
 #include <time.h>
 #include <strings.h>
+#if defined(__FreeBSD__)
+#include <sys/disk.h>
+#endif
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#if defined(__linux__)
 #include <linux/fs.h>
+#endif
 #include <sys/ioctl.h>
 #ifdef HAVE_ERR_H
 #include <err.h>
@@ -41,8 +46,11 @@
 #include <fcntl.h>
 #include <random>
 
+#include "include/compat.h"
 #include "include/intarith.h"
+#if defined(WITH_KRBD)
 #include "include/krbd.h"
+#endif
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.h"
@@ -89,6 +97,7 @@ int			logcount = 0;	/* total ops */
  * FALLOCATE:	-	5
  * PUNCH HOLE:	-	6
  * WRITESAME:	-	7
+ * COMPAREANDWRITE:	-	8
  *
  * When mapped read/writes are disabled, they are simply converted to normal
  * reads and writes. When fallocate/fpunch calls are disabled, they are
@@ -113,10 +122,11 @@ int			logcount = 0;	/* total ops */
 #define OP_FALLOCATE	5
 #define OP_PUNCH_HOLE	6
 #define OP_WRITESAME	7
+#define OP_COMPARE_AND_WRITE	8
 /* rbd-specific operations */
-#define OP_CLONE        8
-#define OP_FLATTEN	9
-#define OP_MAX_FULL	10
+#define OP_CLONE        9
+#define OP_FLATTEN	10
+#define OP_MAX_FULL	11
 
 /* operation modifiers */
 #define OP_CLOSEOPEN	100
@@ -143,6 +153,7 @@ int	closeprob = 0;			/* -c flag */
 int	debug = 0;			/* -d flag */
 unsigned long	debugstart = 0;		/* -D flag */
 int	flush_enabled = 0;		/* -f flag */
+int	deep_copy = 0;                  /* -g flag */
 int	holebdy = 1;			/* -h flag */
 bool    journal_replay = false;         /* -j flah */
 int	keep_on_success = 0;		/* -k flag */
@@ -511,13 +522,17 @@ struct rbd_operations {
 	int (*flatten)(struct rbd_ctx *ctx);
 	ssize_t (*writesame)(struct rbd_ctx *ctx, uint64_t off, size_t len,
 			     const char *buf, size_t data_len);
+        ssize_t (*compare_and_write)(struct rbd_ctx *ctx, uint64_t off, size_t len,
+                                     const char *cmp_buf, const char *buf);
 };
 
 char *pool;			/* name of the pool our test image is in */
 char *iname;			/* name of our test image */
 rados_t cluster;		/* handle for our test cluster */
 rados_ioctx_t ioctx;		/* handle for our test pool */
+#if defined(WITH_KRBD)
 struct krbd_ctx *krbd;		/* handle for libkrbd */
+#endif
 bool skip_partial_discard;	/* rbd_skip_partial_discard config value*/
 
 /*
@@ -678,6 +693,31 @@ librbd_writesame(struct rbd_ctx *ctx, uint64_t off, size_t len,
 	return n;
 }
 
+ssize_t
+librbd_compare_and_write(struct rbd_ctx *ctx, uint64_t off, size_t len,
+                         const char *cmp_buf, const char *buf)
+{
+        ssize_t n;
+        int ret;
+        uint64_t mismatch_off = 0;
+
+        n = rbd_compare_and_write(ctx->image, off, len, cmp_buf, buf, &mismatch_off, 0);
+        if (n == -EINVAL) {
+                return n;
+        } else if (n < 0) {
+                prt("rbd_compare_and_write mismatch(%llu, %zu, %llu) failed\n",
+                    off, len, mismatch_off);
+                return n;
+        }
+
+        ret = librbd_verify_object_map(ctx);
+        if (ret < 0) {
+                return ret;
+        }
+        return n;
+
+}
+
 int
 librbd_get_size(struct rbd_ctx *ctx, uint64_t *size)
 {
@@ -716,6 +756,79 @@ librbd_resize(struct rbd_ctx *ctx, uint64_t size)
 }
 
 int
+__librbd_deep_copy(struct rbd_ctx *ctx, const char *src_snapname,
+		   const char *dst_imagename, uint64_t features, int *order,
+		   int stripe_unit, int stripe_count) {
+	int ret;
+
+        rbd_image_options_t opts;
+        rbd_image_options_create(&opts);
+        BOOST_SCOPE_EXIT_ALL( (&opts) ) {
+                rbd_image_options_destroy(opts);
+        };
+	ret = rbd_image_options_set_uint64(opts, RBD_IMAGE_OPTION_FEATURES,
+                                           features);
+	assert(ret == 0);
+	ret = rbd_image_options_set_uint64(opts, RBD_IMAGE_OPTION_ORDER,
+                                           *order);
+	assert(ret == 0);
+	ret = rbd_image_options_set_uint64(opts, RBD_IMAGE_OPTION_STRIPE_UNIT,
+                                           stripe_unit);
+	assert(ret == 0);
+	ret = rbd_image_options_set_uint64(opts, RBD_IMAGE_OPTION_STRIPE_COUNT,
+                                           stripe_count);
+	assert(ret == 0);
+
+	ret = rbd_snap_set(ctx->image, src_snapname);
+	if (ret < 0) {
+		prt("rbd_snap_set(%s@%s) failed\n", ctx->name, src_snapname);
+		return ret;
+	}
+
+	ret = rbd_deep_copy(ctx->image, ioctx, dst_imagename, opts);
+	if (ret < 0) {
+		prt("rbd_deep_copy(%s@%s -> %s) failed\n",
+		    ctx->name, src_snapname, dst_imagename);
+		return ret;
+	}
+
+	ret = rbd_snap_set(ctx->image, "");
+	if (ret < 0) {
+		prt("rbd_snap_set(%s@) failed\n", ctx->name);
+		return ret;
+	}
+
+	rbd_image_t image;
+	ret = rbd_open(ioctx, dst_imagename, &image, nullptr);
+	if (ret < 0) {
+		prt("rbd_open(%s) failed\n", dst_imagename);
+		return ret;
+	}
+
+	ret = rbd_snap_unprotect(image, src_snapname);
+	if (ret < 0) {
+		prt("rbd_snap_unprotect(%s@%s) failed\n", dst_imagename,
+		    src_snapname);
+		return ret;
+	}
+
+	ret = rbd_snap_remove(image, src_snapname);
+	if (ret < 0) {
+		prt("rbd_snap_remove(%s@%s) failed\n", dst_imagename,
+		    src_snapname);
+		return ret;
+	}
+
+	ret = rbd_close(image);
+	if (ret < 0) {
+		prt("rbd_close(%s) failed\n", dst_imagename);
+		return ret;
+	}
+
+	return 0;
+}
+
+int
 __librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
 	       const char *dst_imagename, int *order, int stripe_unit,
 	       int stripe_count, bool krbd)
@@ -743,13 +856,23 @@ __librbd_clone(struct rbd_ctx *ctx, const char *src_snapname,
                               RBD_FEATURE_DEEP_FLATTEN   |
                               RBD_FEATURE_JOURNALING);
 	}
-	ret = rbd_clone2(ioctx, ctx->name, src_snapname, ioctx,
-			 dst_imagename, features, order,
-			 stripe_unit, stripe_count);
-	if (ret < 0) {
-		prt("rbd_clone2(%s@%s -> %s) failed\n", ctx->name,
-		    src_snapname, dst_imagename);
-		return ret;
+	if (deep_copy) {
+		ret = __librbd_deep_copy(ctx, src_snapname, dst_imagename, features,
+					 order, stripe_unit, stripe_count);
+		if (ret < 0) {
+			prt("deep_copy(%s@%s -> %s) failed\n", ctx->name,
+			    src_snapname, dst_imagename);
+			return ret;
+		}
+	} else {
+		ret = rbd_clone2(ioctx, ctx->name, src_snapname, ioctx,
+				 dst_imagename, features, order,
+				 stripe_unit, stripe_count);
+		if (ret < 0) {
+			prt("rbd_clone2(%s@%s -> %s) failed\n", ctx->name,
+			    src_snapname, dst_imagename);
+			return ret;
+		}
 	}
 
 	return 0;
@@ -796,8 +919,10 @@ const struct rbd_operations librbd_operations = {
 	librbd_clone,
 	librbd_flatten,
 	librbd_writesame,
+	librbd_compare_and_write,
 };
 
+#if defined(WITH_KRBD)
 int
 krbd_open(const char *name, struct rbd_ctx *ctx)
 {
@@ -854,7 +979,9 @@ krbd_close(struct rbd_ctx *ctx)
 
 	return __librbd_close(ctx);
 }
+#endif // WITH_KRBD
 
+#if defined(__linux__)
 ssize_t
 krbd_read(struct rbd_ctx *ctx, uint64_t off, size_t len, char *buf)
 {
@@ -1036,7 +1163,9 @@ krbd_flatten(struct rbd_ctx *ctx)
 
 	return __librbd_flatten(ctx);
 }
+#endif // __linux__
 
+#if defined(WITH_KRBD)
 const struct rbd_operations krbd_operations = {
 	krbd_open,
 	krbd_close,
@@ -1050,7 +1179,9 @@ const struct rbd_operations krbd_operations = {
 	krbd_flatten,
 	NULL,
 };
+#endif // WITH_KRBD
 
+#if defined(__linux__)
 int
 nbd_open(const char *name, struct rbd_ctx *ctx)
 {
@@ -1173,6 +1304,268 @@ const struct rbd_operations nbd_operations = {
 	krbd_flatten,
 	NULL,
 };
+#endif // __linux__
+
+#if defined(__FreeBSD__)
+int
+ggate_open(const char *name, struct rbd_ctx *ctx)
+{
+	int r;
+	int fd;
+	char dev[4096];
+	char *devnode;
+
+	SubProcess process("rbd-ggate", SubProcess::KEEP, SubProcess::PIPE,
+			   SubProcess::KEEP);
+	process.add_cmd_arg("map");
+	std::string img;
+	img.append(pool);
+	img.append("/");
+	img.append(name);
+	process.add_cmd_arg(img.c_str());
+
+	r = __librbd_open(name, ctx);
+	if (r < 0) {
+		return r;
+	}
+
+	r = process.spawn();
+	if (r < 0) {
+		prt("ggate_open failed to run rbd-ggate: %s\n",
+		    process.err().c_str());
+		return r;
+	}
+	r = safe_read(process.get_stdout(), dev, sizeof(dev));
+	if (r < 0) {
+		prt("ggate_open failed to get ggate device path\n");
+		return r;
+	}
+	for (int i = 0; i < r; ++i) {
+		if (dev[i] == '\r' || dev[i] == '\n') {
+			dev[i] = 0;
+		}
+	}
+	dev[r] = 0;
+	r = process.join();
+	if (r) {
+		prt("rbd-ggate failed with error: %s", process.err().c_str());
+		return -EINVAL;
+	}
+
+	devnode = strdup(dev);
+	if (!devnode) {
+		return -ENOMEM;
+	}
+
+	for (int i = 0; i < 100; i++) {
+		fd = open(devnode, O_RDWR | o_direct);
+		if (fd >= 0 || errno != ENOENT) {
+			break;
+		}
+		usleep(100000);
+	}
+	if (fd < 0) {
+		r = -errno;
+		prt("open(%s) failed\n", devnode);
+		return r;
+	}
+
+	ctx->krbd_name = devnode;
+	ctx->krbd_fd = fd;
+
+	return 0;
+}
+
+int
+ggate_close(struct rbd_ctx *ctx)
+{
+	int r;
+
+	assert(ctx->krbd_name && ctx->krbd_fd >= 0);
+
+	if (close(ctx->krbd_fd) < 0) {
+		r = -errno;
+		prt("close(%s) failed\n", ctx->krbd_name);
+		return r;
+	}
+
+	SubProcess process("rbd-ggate");
+	process.add_cmd_arg("unmap");
+	process.add_cmd_arg(ctx->krbd_name);
+
+        r = process.spawn();
+        if (r < 0) {
+		prt("ggate_close failed to run rbd-nbd: %s\n",
+		    process.err().c_str());
+		return r;
+        }
+	r = process.join();
+	if (r) {
+		prt("rbd-ggate failed with error: %d", process.err().c_str());
+		return -EINVAL;
+	}
+
+	free((void *)ctx->krbd_name);
+
+	ctx->krbd_name = NULL;
+	ctx->krbd_fd = -1;
+
+	return __librbd_close(ctx);
+}
+
+ssize_t
+ggate_read(struct rbd_ctx *ctx, uint64_t off, size_t len, char *buf)
+{
+	ssize_t n;
+
+	n = pread(ctx->krbd_fd, buf, len, off);
+	if (n < 0) {
+		n = -errno;
+		prt("pread(%llu, %zu) failed\n", off, len);
+		return n;
+	}
+
+	return n;
+}
+
+ssize_t
+ggate_write(struct rbd_ctx *ctx, uint64_t off, size_t len, const char *buf)
+{
+	ssize_t n;
+
+	n = pwrite(ctx->krbd_fd, buf, len, off);
+	if (n < 0) {
+		n = -errno;
+		prt("pwrite(%llu, %zu) failed\n", off, len);
+		return n;
+	}
+
+	return n;
+}
+
+int
+__ggate_flush(struct rbd_ctx *ctx, bool invalidate)
+{
+	int ret;
+
+	if (o_direct) {
+		return 0;
+	}
+
+	if (invalidate) {
+		ret = ioctl(ctx->krbd_fd, DIOCGFLUSH, NULL);
+	} else {
+		ret = fsync(ctx->krbd_fd);
+	}
+	if (ret < 0) {
+		ret = -errno;
+		prt("%s failed\n", invalidate ? "DIOCGFLUSH" : "fsync");
+		return ret;
+	}
+
+	return 0;
+}
+
+int
+ggate_flush(struct rbd_ctx *ctx)
+{
+	return __ggate_flush(ctx, false);
+}
+
+int
+ggate_discard(struct rbd_ctx *ctx, uint64_t off, uint64_t len)
+{
+	off_t range[2] = {static_cast<off_t>(off), static_cast<off_t>(len)};
+	int ret;
+
+	ret = __ggate_flush(ctx, true);
+	if (ret < 0) {
+		return ret;
+	}
+
+	if (ioctl(ctx->krbd_fd, DIOCGDELETE, &range) < 0) {
+		ret = -errno;
+		prt("DIOCGDELETE(%llu, %llu) failed\n", off, len);
+		return ret;
+	}
+
+	return 0;
+}
+
+int
+ggate_get_size(struct rbd_ctx *ctx, uint64_t *size)
+{
+	off_t bytes;
+
+	if (ioctl(ctx->krbd_fd, DIOCGMEDIASIZE, &bytes) < 0) {
+		int ret = -errno;
+		prt("DIOCGMEDIASIZE failed\n");
+		return ret;
+	}
+
+	*size = bytes;
+
+	return 0;
+}
+
+int
+ggate_resize(struct rbd_ctx *ctx, uint64_t size)
+{
+	int ret;
+
+	assert(size % truncbdy == 0);
+
+	ret = __ggate_flush(ctx, false);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return __librbd_resize(ctx, size);
+}
+
+int
+ggate_clone(struct rbd_ctx *ctx, const char *src_snapname,
+	    const char *dst_imagename, int *order, int stripe_unit,
+	    int stripe_count)
+{
+	int ret;
+
+	ret = __ggate_flush(ctx, false);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return __librbd_clone(ctx, src_snapname, dst_imagename, order,
+			      stripe_unit, stripe_count, false);
+}
+
+int
+ggate_flatten(struct rbd_ctx *ctx)
+{
+	int ret;
+
+	ret = __ggate_flush(ctx, false);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return __librbd_flatten(ctx);
+}
+
+const struct rbd_operations ggate_operations = {
+	ggate_open,
+	ggate_close,
+	ggate_read,
+	ggate_write,
+	ggate_flush,
+	ggate_discard,
+	ggate_get_size,
+	ggate_resize,
+	ggate_clone,
+	ggate_flatten,
+	NULL,
+};
+#endif // __FreeBSD__
 
 struct rbd_ctx ctx = RBD_CTX_INIT;
 const struct rbd_operations *ops = &librbd_operations;
@@ -1306,6 +1699,18 @@ logdump(void)
 				badoff < lp->args[0] + lp->args[1])
 				prt("\t***WSWSWSWS");
 			break;
+		case OP_COMPARE_AND_WRITE:
+                        prt("COMPARE_AND_WRITE    0x%x thru 0x%x\t(0x%x bytes)",
+                            lp->args[0], lp->args[0] + lp->args[1] - 1,
+                            lp->args[1]);
+                        if (lp->args[0] > lp->args[2])
+                            prt(" HOLE");
+                        else if (lp->args[0] + lp->args[1] > lp->args[2])
+                            prt(" EXTEND");
+                        if ((badoff >= lp->args[0] || badoff >=lp->args[2]) &&
+                                badoff < lp->args[0] + lp->args[1])
+                                prt("\t***WWWW");
+                        break;
 		case OP_CLONE:
 			prt("CLONE");
 			break;
@@ -1506,11 +1911,13 @@ create_image()
 		simple_err("Error connecting to cluster", r);
 		goto failed_shutdown;
 	}
+#if defined(WITH_KRBD)
 	r = krbd_create_from_context(rados_cct(cluster), &krbd);
 	if (r < 0) {
 		simple_err("Could not create libkrbd handle", r);
 		goto failed_shutdown;
 	}
+#endif
 
 	r = rados_pool_create(cluster, pool);
 	if (r < 0 && r != -EEXIST) {
@@ -1522,6 +1929,8 @@ create_image()
 		simple_err("Error creating ioctx", r);
 		goto failed_krbd;
 	}
+        rados_application_enable(ioctx, "rbd", 1);
+
 	if (clone_calls || journal_replay) {
                 uint64_t features = 0;
                 if (clone_calls) {
@@ -1531,9 +1940,9 @@ create_image()
                         features |= (RBD_FEATURE_EXCLUSIVE_LOCK |
                                      RBD_FEATURE_JOURNALING);
                 }
-		r = rbd_create2(ioctx, iname, 0, features, &order);
+		r = rbd_create2(ioctx, iname, file_size, features, &order);
 	} else {
-		r = rbd_create(ioctx, iname, 0, &order);
+		r = rbd_create(ioctx, iname, file_size, &order);
 	}
 	if (r < 0) {
 		simple_err("Error creating image", r);
@@ -1560,7 +1969,9 @@ create_image()
  failed_open:
 	rados_ioctx_destroy(ioctx);
  failed_krbd:
+#if defined(WITH_KRBD)
 	krbd_destroy(krbd);
+#endif
  failed_shutdown:
 	rados_shutdown(cluster);
 	return r;
@@ -1913,6 +2324,72 @@ dowritesame(unsigned offset, unsigned size)
 		doflush(offset, size);
 }
 
+void
+docompareandwrite(unsigned offset, unsigned size)
+{
+        int ret;
+
+        if (skip_partial_discard) {
+                if (!quiet && testcalls > simulatedopcount)
+                        prt("compare and write disabled\n");
+                log4(OP_SKIPPED, OP_COMPARE_AND_WRITE, offset, size);
+                return;
+        }
+
+        offset -= offset % writebdy;
+        if (o_direct)
+                size -= size % writebdy;
+
+        if (size == 0) {
+                if (!quiet && testcalls > simulatedopcount && !o_direct)
+                        prt("skipping zero size read\n");
+                log4(OP_SKIPPED, OP_READ, offset, size);
+                return;
+        }
+
+        if (size + offset > file_size) {
+                if (!quiet && testcalls > simulatedopcount)
+                        prt("skipping seek/compare past end of file\n");
+                log4(OP_SKIPPED, OP_COMPARE_AND_WRITE, offset, size);
+                return;
+        }
+
+        memcpy(temp_buf + offset, good_buf + offset, size);
+	gendata(original_buf, good_buf, offset, size);
+        log4(OP_COMPARE_AND_WRITE, offset, size, 0);
+
+        if (testcalls <= simulatedopcount)
+                return;
+
+        if (!quiet &&
+		((progressinterval && testcalls % progressinterval == 0) ||
+		       (debug &&
+		       (monitorstart == -1 ||
+			(static_cast<long>(offset + size) > monitorstart &&
+			 (monitorend == -1 ||
+			  static_cast<long>(offset) <= monitorend))))))
+		prt("%lu compareandwrite\t0x%x thru\t0x%x\t(0x%x bytes)\n", testcalls,
+		    offset, offset + size - 1, size);
+
+        ret = ops->compare_and_write(&ctx, offset, size, temp_buf + offset,
+                                     good_buf + offset);
+        if (ret != (ssize_t)size) {
+                if (ret == -EINVAL) {
+                        memcpy(good_buf + offset, temp_buf + offset, size);
+                        return;
+                }
+                if (ret < 0)
+                        prterrcode("docompareandwrite: ops->compare_and_write", ret);
+                else
+                        prt("short write: 0x%x bytes instead of 0x%x\n", ret, size);
+                report_failure(151);
+                return;
+        }
+
+        if (flush_enabled)
+                doflush(offset, size);
+}
+
 void clone_filename(char *buf, size_t len, int clones)
 {
 	snprintf(buf, len, "%s/fsx-%s-parent%d",
@@ -2096,7 +2573,7 @@ check_clone(int clonenum, bool replay_image)
 
 	good_buf = NULL;
 	ret = posix_memalign((void **)&good_buf,
-			     MAX(writebdy, (int)sizeof(void *)),
+			     std::max(writebdy, (int)sizeof(void *)),
 			     file_info.st_size);
 	if (ret > 0) {
 		prterrcode("check_clone: posix_memalign(good_buf)", -ret);
@@ -2105,7 +2582,7 @@ check_clone(int clonenum, bool replay_image)
 
 	temp_buf = NULL;
 	ret = posix_memalign((void **)&temp_buf,
-			     MAX(readbdy, (int)sizeof(void *)),
+			     std::max(readbdy, (int)sizeof(void *)),
 			     file_info.st_size);
 	if (ret > 0) {
 		prterrcode("check_clone: posix_memalign(temp_buf)", -ret);
@@ -2290,6 +2767,14 @@ test(void)
 			log4(OP_SKIPPED, OP_WRITESAME, offset, size);
 			goto out;
 		}
+		break;
+        case OP_COMPARE_AND_WRITE:
+                /* compare_and_write not implemented */
+                if (!ops->compare_and_write) {
+                        log4(OP_SKIPPED, OP_COMPARE_AND_WRITE, offset, size);
+                        goto out;
+                }
+		break;
 	}
 
 	switch (op) {
@@ -2328,6 +2813,10 @@ test(void)
 		TRIM_OFF_LEN(offset, size, maxfilelen);
 		dowritesame(offset, size);
 		break;
+        case OP_COMPARE_AND_WRITE:
+                TRIM_OFF_LEN(offset, size, file_size);
+                docompareandwrite(offset, size);
+                break;
 
 	case OP_CLONE:
 		do_clone();
@@ -2370,6 +2859,7 @@ usage(void)
 	-c P: 1 in P chance of file close+open at each op (default infinity)\n\
 	-d: debug output for all operations\n\
 	-f: flush and invalidate cache after I/O\n\
+        -g: deep copy instead of clone\n\
 	-h holebdy: 4096 would make discards page aligned (default 1)\n\
 	-j: journal replay stress test\n\
 	-k: keep data on success (default 0)\n\
@@ -2391,10 +2881,17 @@ usage(void)
 #ifdef FALLOCATE
 "	-F: Do not use fallocate (preallocation) calls\n"
 #endif
-"	-H: do not use punch hole calls\n\
-	-K: enable krbd mode (use -t and -h too)\n\
-	-M: enable rbd-nbd mode (use -t and -h too)\n\
-	-L: fsxLite - no file creations & no file size changes\n\
+#if defined(__FreeBSD__)
+"	-G: enable rbd-ggate mode (use -L, -r and -w too)\n"
+#endif
+"	-H: do not use punch hole calls\n"
+#if defined(WITH_KRBD)
+"	-K: enable krbd mode (use -t and -h too)\n"
+#endif
+#if defined(__linux__)
+"	-M: enable rbd-nbd mode (use -t and -h too)\n"
+#endif
+"	-L: fsxLite - no file creations & no file size changes\n\
 	-N numops: total # operations to do (default infinity)\n\
 	-O: use oplen (see -o flag) for every op (default random)\n\
 	-P dirpath: save .fsxlog and .fsxgood files in dirpath (default ./)\n\
@@ -2521,7 +3018,7 @@ main(int argc, char **argv)
 
 	setvbuf(stdout, (char *)0, _IOLBF, 0); /* line buffered stdout */
 
-	while ((ch = getopt(argc, argv, "b:c:dfh:jkl:m:no:p:qr:s:t:w:xyCD:FHKMLN:OP:RS:UWZ"))
+	while ((ch = getopt(argc, argv, "b:c:dfgh:jkl:m:no:p:qr:s:t:w:xyCD:FGHKMLN:OP:RS:UWZ"))
 	       != EOF)
 		switch (ch) {
 		case 'b':
@@ -2547,6 +3044,9 @@ main(int argc, char **argv)
 			break;
 		case 'f':
 			flush_enabled = 1;
+			break;
+		case 'g':
+			deep_copy = 1;
 			break;
 		case 'h':
 			holebdy = getnum(optarg, &endp);
@@ -2633,20 +3133,29 @@ main(int argc, char **argv)
 		case 'F':
 			fallocate_calls = 0;
 			break;
+#if defined(__FreeBSD__)
+		case 'G':
+			prt("rbd-ggate mode enabled\n");
+			ops = &ggate_operations;
+			break;
+#endif
 		case 'H':
 			punch_hole_calls = 0;
 			break;
+#if defined(WITH_KRBD)
 		case 'K':
 			prt("krbd mode enabled\n");
 			ops = &krbd_operations;
 			break;
+#endif
+#if defined(__linux__)
 		case 'M':
 			prt("rbd-nbd mode enabled\n");
 			ops = &nbd_operations;
 			break;
+#endif
 		case 'L':
-			prt("lite mode not supported for rbd\n");
-			exit(1);
+			lite = 1;
 			break;
 		case 'N':
 			numops = getnum(optarg, &endp);
@@ -2725,6 +3234,10 @@ main(int argc, char **argv)
 
 	random_generator.seed(seed);
 
+	if (lite) {
+		file_size = maxfilelen;
+	}
+
 	ret = create_image();
 	if (ret < 0) {
 		prterrcode(iname, ret);
@@ -2757,7 +3270,7 @@ main(int argc, char **argv)
 		original_buf[i] = get_random() % 256;
 
 	ret = posix_memalign((void **)&good_buf,
-			     MAX(writebdy, (int)sizeof(void *)), maxfilelen);
+			     std::max(writebdy, (int)sizeof(void *)), maxfilelen);
 	if (ret > 0) {
 		if (ret == EINVAL)
 			prt("writebdy is not a suitable power of two\n");
@@ -2768,7 +3281,7 @@ main(int argc, char **argv)
 	memset(good_buf, '\0', maxfilelen);
 
 	ret = posix_memalign((void **)&temp_buf,
-			     MAX(readbdy, (int)sizeof(void *)), maxfilelen);
+			     std::max(readbdy, (int)sizeof(void *)), maxfilelen);
 	if (ret > 0) {
 		if (ret == EINVAL)
 			prt("readbdy is not a suitable power of two\n");
@@ -2851,7 +3364,9 @@ main(int argc, char **argv)
 	fclose(fsxlogf);
 
 	rados_ioctx_destroy(ioctx);
+#if defined(WITH_KRBD)
 	krbd_destroy(krbd);
+#endif
 	rados_shutdown(cluster);
 
 	free(original_buf);

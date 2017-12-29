@@ -524,6 +524,32 @@ int CLSRGWIssueGetDirHeader::issue_op(int shard_id, const string& oid)
   return issue_bucket_list_op(io_ctx, oid, nokey, "", 0, false, &manager, &result[shard_id]);
 }
 
+static bool issue_resync_bi_log(librados::IoCtx& io_ctx, const string& oid, BucketIndexAioManager *manager)
+{
+  bufferlist in;
+  librados::ObjectWriteOperation op;
+  op.exec("rgw", "bi_log_resync", in);
+  return manager->aio_operate(io_ctx, oid, &op);
+}
+
+int CLSRGWIssueResyncBucketBILog::issue_op(int shard_id, const string& oid)
+{
+  return issue_resync_bi_log(io_ctx, oid, &manager);
+}
+
+static bool issue_bi_log_stop(librados::IoCtx& io_ctx, const string& oid, BucketIndexAioManager *manager)
+{
+  bufferlist in;
+  librados::ObjectWriteOperation op;
+  op.exec("rgw", "bi_log_stop", in);
+  return manager->aio_operate(io_ctx, oid, &op); 
+}
+
+int CLSRGWIssueBucketBILogStop::issue_op(int shard_id, const string& oid)
+{
+  return issue_bi_log_stop(io_ctx, oid, &manager);
+}
+
 class GetDirHeaderCompletion : public ObjectOperationCompletion {
   RGWGetDirHeader_CB *ret_ctx;
 public:
@@ -598,8 +624,8 @@ int cls_rgw_usage_log_read(IoCtx& io_ctx, string& oid, string& user,
   return 0;
 }
 
-void cls_rgw_usage_log_trim(ObjectWriteOperation& op, string& user,
-                           uint64_t start_epoch, uint64_t end_epoch)
+int cls_rgw_usage_log_trim(IoCtx& io_ctx, const string& oid, string& user,
+			   uint64_t start_epoch, uint64_t end_epoch)
 {
   bufferlist in;
   rgw_cls_usage_log_trim_op call;
@@ -607,8 +633,22 @@ void cls_rgw_usage_log_trim(ObjectWriteOperation& op, string& user,
   call.end_epoch = end_epoch;
   call.user = user;
   ::encode(call, in);
-  op.exec(RGW_CLASS, RGW_USER_USAGE_LOG_TRIM, in);
+
+  bool done = false;
+  do {
+    ObjectWriteOperation op;
+    op.exec(RGW_CLASS, RGW_USER_USAGE_LOG_TRIM, in);
+    int r = io_ctx.operate(oid, &op);
+    if (r == -ENODATA)
+      done = true;
+    else if (r < 0)
+      return r;
+  } while (!done);
+
+  return 0;
 }
+
+
 
 void cls_rgw_usage_log_add(ObjectWriteOperation& op, rgw_usage_log_info& info)
 {

@@ -7,7 +7,6 @@
 #endif
 
 #include <iostream>
-using namespace std;
 
 #include "include/types.h"
 
@@ -65,8 +64,6 @@ using namespace std;
 #include "messages/MOSDPing.h"
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
-#include "messages/MOSDSubOp.h"
-#include "messages/MOSDSubOpReply.h"
 #include "messages/MOSDRepOp.h"
 #include "messages/MOSDRepOpReply.h"
 #include "messages/MOSDMap.h"
@@ -84,10 +81,13 @@ using namespace std;
 #include "messages/MOSDScrubReserve.h"
 #include "messages/MOSDRepScrub.h"
 #include "messages/MOSDRepScrubMap.h"
+#include "messages/MOSDForceRecovery.h"
 #include "messages/MOSDPGScan.h"
 #include "messages/MOSDPGBackfill.h"
 #include "messages/MOSDBackoff.h"
 #include "messages/MOSDPGBackfillRemove.h"
+#include "messages/MOSDPGRecoveryDelete.h"
+#include "messages/MOSDPGRecoveryDeleteReply.h"
 
 #include "messages/MRemoveSnaps.h"
 
@@ -95,7 +95,6 @@ using namespace std;
 #include "messages/MMonGetMap.h"
 #include "messages/MMonGetVersion.h"
 #include "messages/MMonGetVersionReply.h"
-#include "messages/MMonHealth.h"
 #include "messages/MMonHealthChecks.h"
 #include "messages/MMonMetadata.h"
 #include "messages/MDataPing.h"
@@ -400,6 +399,9 @@ Message *decode_message(CephContext *cct, int crcflags,
   case MSG_OSD_RECOVERY_RESERVE:
     m = new MRecoveryReserve;
     break;
+  case MSG_OSD_FORCE_RECOVERY:
+    m = new MOSDForceRecovery;
+    break;
 
   case MSG_ROUTE:
     m = new MRoute;
@@ -456,12 +458,6 @@ Message *decode_message(CephContext *cct, int crcflags,
     break;
   case CEPH_MSG_OSD_OPREPLY:
     m = new MOSDOpReply();
-    break;
-  case MSG_OSD_SUBOP:
-    m = new MOSDSubOp();
-    break;
-  case MSG_OSD_SUBOPREPLY:
-    m = new MOSDSubOpReply();
     break;
   case MSG_OSD_REPOP:
     m = new MOSDRepOp();
@@ -544,6 +540,12 @@ Message *decode_message(CephContext *cct, int crcflags,
     break;
   case MSG_OSD_PG_PUSH_REPLY:
     m = new MOSDPGPushReply;
+    break;
+  case MSG_OSD_PG_RECOVERY_DELETE:
+    m = new MOSDPGRecoveryDelete;
+    break;
+  case MSG_OSD_PG_RECOVERY_DELETE_REPLY:
+    m = new MOSDPGRecoveryDeleteReply;
     break;
   case MSG_OSD_EC_WRITE:
     m = new MOSDECSubOpWrite;
@@ -779,10 +781,6 @@ Message *decode_message(CephContext *cct, int crcflags,
 
   case MSG_TIMECHECK:
     m = new MTimeCheck();
-    break;
-
-  case MSG_MON_HEALTH:
-    m = new MMonHealth();
     break;
 
   case MSG_MON_HEALTH_CHECKS:

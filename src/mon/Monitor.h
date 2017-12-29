@@ -37,7 +37,7 @@
 #include "Elector.h"
 #include "Paxos.h"
 #include "Session.h"
-#include "PGStatService.h"
+#include "MonCommand.h"
 
 #include "common/LogClient.h"
 #include "auth/cephx/CephxKeyServer.h"
@@ -76,10 +76,6 @@ enum {
   l_cluster_num_object_misplaced,
   l_cluster_num_object_unfound,
   l_cluster_num_bytes,
-  l_cluster_num_mds_up,
-  l_cluster_num_mds_in,
-  l_cluster_num_mds_failed,
-  l_cluster_mds_epoch,
   l_cluster_last,
 };
 
@@ -113,7 +109,6 @@ struct MRoute;
 struct MForward;
 struct MTimeCheck;
 struct MMonHealth;
-struct MonCommand;
 
 #define COMPAT_SET_LOC "feature_set"
 
@@ -165,14 +160,13 @@ public:
 
   CompatSet features;
 
-  const MonCommand *leader_supported_mon_commands;
-  int leader_supported_mon_commands_size;
+  vector<MonCommand> leader_mon_commands; // quorum leader's commands
+  vector<MonCommand> local_mon_commands;  // commands i support
+  bufferlist local_mon_commands_bl;       // encoded version of above
 
   Messenger *mgr_messenger;
   MgrClient mgr_client;
   uint64_t mgr_proxy_bytes = 0;  // in-flight proxied mgr command message bytes
-
-  const MonPGStatService *pgservice;
 
 private:
   void new_tick();
@@ -248,7 +242,6 @@ private:
    * Intersection of quorum members mon-specific feature bits
    */
   mon_feature_t quorum_mon_features;
-  bufferlist supported_commands_bl; // encoded MonCommands we support
 
   set<string> outside_quorum;
 
@@ -600,17 +593,12 @@ public:
   void win_election(epoch_t epoch, set<int>& q,
 		    uint64_t features,
                     const mon_feature_t& mon_features,
-		    const map<int,Metadata>& metadata,
-		    const MonCommand *cmdset, int cmdsize);
+		    const map<int,Metadata>& metadata);
   void lose_election(epoch_t epoch, set<int>& q, int l,
 		     uint64_t features,
                      const mon_feature_t& mon_features);
   // end election (called by Elector)
   void finish_election();
-
-  const bufferlist& get_supported_commands_bl() {
-    return supported_commands_bl;
-  }
 
   void update_logger();
 
@@ -618,10 +606,6 @@ public:
    * Vector holding the Services serviced by this Monitor.
    */
   vector<PaxosService*> paxos_service;
-
-  class PGMonitor *pgmon() {
-    return (class PGMonitor *)paxos_service[PAXOS_PGMAP];
-  }
 
   class MDSMonitor *mdsmon() {
     return (class MDSMonitor *)paxos_service[PAXOS_MDSMAP];
@@ -651,19 +635,17 @@ public:
     return (class MgrStatMonitor*) paxos_service[PAXOS_MGRSTAT];
   }
 
-  class MgrStatMonitor *healthmon() {
-    return (class MgrStatMonitor*) paxos_service[PAXOS_MGRSTAT];
+  class HealthMonitor *healthmon() {
+    return (class HealthMonitor*) paxos_service[PAXOS_HEALTH];
   }
 
   friend class Paxos;
   friend class OSDMonitor;
   friend class MDSMonitor;
   friend class MonmapMonitor;
-  friend class PGMonitor;
   friend class LogMonitor;
   friend class ConfigKeyService;
 
-  QuorumService *health_monitor;
   QuorumService *config_key_service;
 
   // -- sessions --
@@ -685,8 +667,9 @@ public:
 
   static void _generate_command_map(map<string,cmd_vartype>& cmdmap,
                                     map<string,string> &param_str_map);
-  static const MonCommand *_get_moncommand(const string &cmd_prefix,
-                                           MonCommand *cmds, int cmds_size);
+  static const MonCommand *_get_moncommand(
+    const string &cmd_prefix,
+    const vector<MonCommand>& cmds);
   bool _allowed_command(MonSession *s, string &module, string &prefix,
                         const map<string,cmd_vartype>& cmdmap,
                         const map<string,string>& param_str_map,
@@ -735,16 +718,6 @@ public:
   void do_health_to_clog_interval();
   void do_health_to_clog(bool force = false);
 
-  /**
-   * Generate health report
-   *
-   * @param status one-line status summary
-   * @param detailbl optional bufferlist* to fill with a detailed report
-   * @returns health status
-   */
-  health_status_t get_health(list<string>& status, bufferlist *detailbl,
-                             Formatter *f);
-
   health_status_t get_health_status(
     bool want_detail,
     Formatter *f,
@@ -755,6 +728,25 @@ public:
     const health_check_map_t& updated,
     const health_check_map_t& previous,
     MonitorDBStore::TransactionRef t);
+
+protected:
+
+  class HealthCheckLogStatus {
+    public:
+    health_status_t severity;
+    std::string last_message;
+    utime_t updated_at = 0;
+    HealthCheckLogStatus(health_status_t severity_,
+                         const std::string &last_message_,
+                         utime_t updated_at_)
+      : severity(severity_),
+        last_message(last_message_),
+        updated_at(updated_at_)
+    {}
+  };
+  std::map<std::string, HealthCheckLogStatus> health_check_log_times;
+
+public:
 
   void get_cluster_status(stringstream &ss, Formatter *f);
 
@@ -899,6 +891,7 @@ public:
   void update_mon_metadata(int from, Metadata&& m);
   int load_metadata();
   void count_metadata(const string& field, Formatter *f);
+  void count_metadata(const string& field, map<string,int> *out);
 
   // features
   static CompatSet get_initial_supported_features();
@@ -960,14 +953,20 @@ private:
   Monitor& operator=(const Monitor &rhs);
 
 public:
-  static void format_command_descriptions(const MonCommand *commands,
-					  unsigned commands_size,
+  static void format_command_descriptions(const std::vector<MonCommand> &commands,
 					  Formatter *f,
-					  bufferlist *rdata,
-					  bool hide_mgr_flag=false);
-  void get_locally_supported_monitor_commands(const MonCommand **cmds, int *count);
-  /// the Monitor owns this pointer once you pass it in
-  void set_leader_supported_commands(const MonCommand *cmds, int size);
+					  bufferlist *rdata);
+
+  const std::vector<MonCommand> &get_local_commands(mon_feature_t f) {
+    return local_mon_commands;
+  }
+  const bufferlist& get_local_commands_bl(mon_feature_t f) {
+    return local_mon_commands_bl;
+  }
+  void set_leader_commands(const std::vector<MonCommand>& cmds) {
+    leader_mon_commands = cmds;
+  }
+
   static bool is_keyring_required();
 };
 
@@ -979,99 +978,10 @@ public:
 #define CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V2 CompatSet::Feature(6, "support isa/lrc erasure code")
 #define CEPH_MON_FEATURE_INCOMPAT_ERASURE_CODE_PLUGINS_V3 CompatSet::Feature(7, "support shec erasure code")
 #define CEPH_MON_FEATURE_INCOMPAT_KRAKEN CompatSet::Feature(8, "support monmap features")
+#define CEPH_MON_FEATURE_INCOMPAT_LUMINOUS CompatSet::Feature(9, "luminous ondisk layout")
+#define CEPH_MON_FEATURE_INCOMPAT_MIMIC CompatSet::Feature(10, "mimic ondisk layout")
 // make sure you add your feature to Monitor::get_supported_features
 
-struct MonCommand {
-  string cmdstring;
-  string helpstring;
-  string module;
-  string req_perms;
-  string availability;
-  uint64_t flags;
 
-  // MonCommand flags
-  static const uint64_t FLAG_NONE       = 0;
-  static const uint64_t FLAG_NOFORWARD  = 1 << 0;
-  static const uint64_t FLAG_OBSOLETE   = 1 << 1;
-  static const uint64_t FLAG_DEPRECATED = 1 << 2;
-  static const uint64_t FLAG_MGR        = 1 << 3;
-
-  bool has_flag(uint64_t flag) const { return (flags & flag) != 0; }
-  void set_flag(uint64_t flag) { flags |= flag; }
-  void unset_flag(uint64_t flag) { flags &= ~flag; }
-
-  void encode(bufferlist &bl) const {
-    /*
-     * very naughty: deliberately unversioned because individual commands
-     * shouldn't be encoded standalone, only as a full set (which we do
-     * version, see encode_array() below).
-     */
-    ::encode(cmdstring, bl);
-    ::encode(helpstring, bl);
-    ::encode(module, bl);
-    ::encode(req_perms, bl);
-    ::encode(availability, bl);
-  }
-  void decode(bufferlist::iterator &bl) {
-    ::decode(cmdstring, bl);
-    ::decode(helpstring, bl);
-    ::decode(module, bl);
-    ::decode(req_perms, bl);
-    ::decode(availability, bl);
-  }
-  bool is_compat(const MonCommand* o) const {
-    return cmdstring == o->cmdstring &&
-	module == o->module && req_perms == o->req_perms &&
-	availability == o->availability;
-  }
-
-  bool is_noforward() const {
-    return has_flag(MonCommand::FLAG_NOFORWARD);
-  }
-
-  bool is_obsolete() const {
-    return has_flag(MonCommand::FLAG_OBSOLETE);
-  }
-
-  bool is_deprecated() const {
-    return has_flag(MonCommand::FLAG_DEPRECATED);
-  }
-
-  bool is_mgr() const {
-    return has_flag(MonCommand::FLAG_MGR);
-  }
-
-  static void encode_array(const MonCommand *cmds, int size, bufferlist &bl) {
-    ENCODE_START(2, 1, bl);
-    uint16_t s = size;
-    ::encode(s, bl);
-    ::encode_array_nohead(cmds, size, bl);
-    for (int i = 0; i < size; i++)
-      ::encode(cmds[i].flags, bl);
-    ENCODE_FINISH(bl);
-  }
-  static void decode_array(MonCommand **cmds, int *size,
-                           bufferlist::iterator &bl) {
-    DECODE_START(2, bl);
-    uint16_t s = 0;
-    ::decode(s, bl);
-    *size = s;
-    *cmds = new MonCommand[*size];
-    ::decode_array_nohead(*cmds, *size, bl);
-    if (struct_v >= 2) {
-      for (int i = 0; i < *size; i++)
-	::decode((*cmds)[i].flags, bl);
-    } else {
-      for (int i = 0; i < *size; i++)
-	(*cmds)[i].flags = 0;
-    }
-    DECODE_FINISH(bl);
-  }
-
-  bool requires_perm(char p) const {
-    return (req_perms.find(p) != string::npos); 
-  }
-};
-WRITE_CLASS_ENCODER(MonCommand)
 
 #endif

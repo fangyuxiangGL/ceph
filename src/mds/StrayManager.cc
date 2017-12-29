@@ -73,14 +73,12 @@ public:
 class C_IO_PurgeStrayPurged : public StrayManagerIOContext {
   CDentry *dn;
   bool only_head;
-  // How many ops_in_flight were allocated to this purge?
-  uint32_t ops_allowance;
 public:
   C_IO_PurgeStrayPurged(StrayManager *sm_, CDentry *d, bool oh) : 
     StrayManagerIOContext(sm_), dn(d), only_head(oh) { }
   void finish(int r) override {
     assert(r == 0 || r == -ENOENT);
-    sm->_purge_stray_purged(dn, ops_allowance, only_head);
+    sm->_purge_stray_purged(dn, only_head);
   }
 };
 
@@ -120,11 +118,11 @@ void StrayManager::purge(CDentry *dn)
     uint64_t to = 0;
     if (in->is_file()) {
       to = in->inode.get_max_size();
-      to = MAX(in->inode.size, to);
+      to = std::max(in->inode.size, to);
       // when truncating a file, the filer does not delete stripe objects that are
       // truncated to zero. so we need to purge stripe objects up to the max size
       // the file has ever been.
-      to = MAX(in->inode.max_size_ever, to);
+      to = std::max(in->inode.max_size_ever, to);
     }
 
     inode_t *pi = in->get_projected_inode();
@@ -163,7 +161,7 @@ public:
 };
 
 void StrayManager::_purge_stray_purged(
-    CDentry *dn, uint32_t ops_allowance, bool only_head)
+    CDentry *dn, bool only_head)
 {
   CInode *in = dn->get_projected_linkage()->get_inode();
   dout(10) << "_purge_stray_purged " << *dn << " " << *in << dendl;
@@ -721,15 +719,16 @@ void StrayManager::truncate(CDentry *dn)
   const SnapContext *snapc = &realm->get_snap_context();
 
   uint64_t to = in->inode.get_max_size();
-  to = MAX(in->inode.size, to);
+  to = std::max(in->inode.size, to);
   // when truncating a file, the filer does not delete stripe objects that are
   // truncated to zero. so we need to purge stripe objects up to the max size
   // the file has ever been.
-  to = MAX(in->inode.max_size_ever, to);
+  to = std::max(in->inode.max_size_ever, to);
 
   assert(to > 0);
 
   PurgeItem item;
+  item.action = PurgeItem::TRUNCATE_FILE;
   item.ino = in->inode.ino;
   item.layout = in->inode.layout;
   item.snapc = *snapc;
