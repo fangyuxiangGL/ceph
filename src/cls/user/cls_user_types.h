@@ -21,7 +21,7 @@ struct cls_user_bucket {
     std::string data_pool;
     std::string data_tail_pool;//No need to decode/encode
     std::string index_pool;
-    std::string data_extra_pool;  
+    std::string data_extra_pool;
   } explicit_placement;
 
   void encode(bufferlist& bl) const {
